@@ -1,0 +1,7 @@
+sentence-transformers==2.2.2
+transformers==4.24.0
+faiss-cpu
+numpy
+tqdm
+rank_bm25>=0.2.2
+openai>=1.0.0

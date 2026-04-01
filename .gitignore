@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+processed/
+raw/
+*.npy
+*.index
+nim_config.py
+.tui_state.json
+.model_nicknames.json
+rag-tui/rag-tui
+discard/
+bin/.DS_Store
+.DS_Store

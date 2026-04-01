@@ -1,0 +1,6 @@
+raw/sania.min.json filter=lfs diff=lfs merge=lfs -text
+processed/embeddings/metadata.json filter=lfs diff=lfs merge=lfs -text
+processed/embeddings/embeddings.npy filter=lfs diff=lfs merge=lfs -text
+processed/vector_store/faiss.index filter=lfs diff=lfs merge=lfs -text
+processed/vector_store/metadata.json filter=lfs diff=lfs merge=lfs -text
+processed/chunks.json filter=lfs diff=lfs merge=lfs -text
