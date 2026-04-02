@@ -1,6 +1,6 @@
 # ragtag
 
-A local RAG system for searching and chatting with your chat message history. Point it at a Discord/chat export, build an index, and ask anything — all on your machine, no cloud required.
+A local RAG system for searching and chatting with your chat message history. Point it at a Slack or Discord export, build an index, and ask anything — all on your machine, no cloud required.
 
 ```
 "When did she go to Japan?"
@@ -12,42 +12,70 @@ Answers come from real retrieved messages with source attribution — no halluci
 
 ---
 
-## Quick Start
+## Installation
+
+The easiest way to install ragtag is with the one-line installer. It handles everything: Python environment, dependencies, TUI binary, and optionally indexes a demo dataset so you can start querying immediately.
+
+```bash
+curl -sL https://ragtag.crsv.es | bash
+```
+
+The installer presents a menu:
+
+- **Release** *(recommended)* — downloads prebuilt binaries, no compiler needed
+- **Clone** — clones the full repo, for developers who want to modify the code
+- **Exit** — quit without installing anything
+
+It will prompt for a NIM API key (used for answer generation), offer to auto-index the included demo dataset, and place a `ragtag` command in `~/.local/bin`.
+
+### Non-interactive / CI install
+
+```bash
+curl -sL https://ragtag.crsv.es | bash -s -- --release --yes --nim-key "nvapi-..."
+```
+
+| Flag | Description |
+|---|---|
+| `--release` | Use prebuilt binaries (recommended) |
+| `--clone` | Clone source instead |
+| `--yes` / `-y` | Accept all defaults, no prompts |
+| `--nim-key <key>` | Supply API key non-interactively |
+| `--skip-nim-key` | Skip key setup (configure later) |
+| `--dir <path>` | Install to a custom directory |
+| `--bin-dir <path>` | Custom directory for the `ragtag` symlink |
+
+---
+
+## Manual Setup
+
+If you prefer not to use the installer:
 
 ### 1. Prerequisites
 
 - **Python 3.9+** — [python.org](https://www.python.org/downloads/)
-- **An OpenAI API key** — used only for the chat answer step
+- **A NIM API key** — [build.nvidia.com](https://build.nvidia.com) — used only for the answer generation step
 
 ### 2. Install Python dependencies
 
-**Linux / macOS**
 ```bash
-bash setup.sh
+pip install -r requirements.txt
 ```
 
-**Windows** (PowerShell)
-```powershell
-.\setup.ps1
-```
-
-This installs `sentence-transformers`, `faiss-cpu`, `numpy`, `tqdm`, and `rank_bm25` locally — no GPU needed.
+This installs `sentence-transformers`, `faiss-cpu`, `numpy`, `tqdm`, `rank_bm25`, and `openai`. No GPU needed.
 
 ### 3. Add your data
 
-Drop your chat export into `raw/`. The pipeline expects JSON in Discord export format (via [DiscordChatExporter](https://github.com/Tyrrrz/DiscordChatExporter)).
+Drop your JSON export into `raw/`. The pipeline accepts Slack exports and Discord exports (via [DiscordChatExporter](https://github.com/Tyrrrz/DiscordChatExporter)).
 
 ```
 raw/
-└── yourexport.min.json
+└── yourexport.json
 ```
-
-Edit `pipeline.py` line 1 to point at your file if needed (default: `raw/sania.min.json`).
 
 ### 4. Build the index
 
 ```bash
-python3 pipeline.py
+python3 pipeline.py raw/yourexport.json
 ```
 
 This runs the full pipeline: normalize → chunk → embed → store. Embedding ~250k messages takes 5–15 minutes on CPU. Only needs to run once.
@@ -60,19 +88,17 @@ processed/
 └── vector_store/        ← FAISS index lives here
 ```
 
-### 5. Configure your OpenAI key
+### 5. Configure your API key
 
 ```bash
 # Linux / macOS
-export OPENAI_API_KEY="sk-..."
+export NIM_API_KEY="nvapi-..."
 
 # Windows (PowerShell)
-$env:OPENAI_API_KEY = "sk-..."
+$env:NIM_API_KEY = "nvapi-..."
 ```
 
 ### 6. Launch the TUI
-
-Download the binary for your platform from the table below, or use the one in `rag-tui/`.
 
 ```bash
 # Linux
@@ -96,17 +122,22 @@ $env:RAG_DIR = (Get-Location).Path
 
 ## Platform Binaries
 
-Pre-built binaries are in `rag-tui/`. No Go installation needed to run them.
+Pre-built binaries are attached to each GitHub release. The installer downloads the right one automatically. No Go installation needed to run them.
 
 | Platform | Binary |
 |---|---|
-| Linux x86-64 | `rag-tui/rag-tui-linux-amd64` |
-| Linux ARM64 | `rag-tui/rag-tui-linux-arm64` |
-| macOS Apple Silicon | `rag-tui/rag-tui-mac-arm64` |
-| macOS Intel | `rag-tui/rag-tui-mac-intel` |
-| Windows x64 | `rag-tui/rag-tui-windows.exe` |
+| Linux x86-64 | `pipeline-linux-amd64` · `rag-tui-linux-amd64` |
+| Linux ARM64 | `pipeline-linux-arm64` · `rag-tui-linux-arm64` |
+| macOS Apple Silicon | `pipeline-mac-arm64` · `rag-tui-mac-arm64` |
+| macOS Intel | `pipeline-mac-intel` · `rag-tui-mac-intel` |
+| Windows x64 | `pipeline-windows.exe` · `rag-tui-windows.exe` |
 
 On macOS you may need to allow the binary in **System Settings → Privacy & Security** the first time you run it.
+
+```bash
+# Remove quarantine attribute if Gatekeeper blocks the binary
+xattr -d com.apple.quarantine ./rag-tui/rag-tui-mac-arm64
+```
 
 ---
 
@@ -115,10 +146,10 @@ On macOS you may need to allow the binary in **System Settings → Privacy & Sec
 | Variable | Required | Description |
 |---|---|---|
 | `RAG_DIR` | Yes | Absolute path to the repo root (where `bridge.py` lives) |
-| `OPENAI_API_KEY` | Yes | Your OpenAI key for answer generation |
+| `NIM_API_KEY` | Yes | Your NIM API key for answer generation |
 | `RAGTAG_PYTHON` | No | Override the Python executable (e.g. `/usr/bin/python3.11`) |
 
-`RAGTAG_PYTHON` is useful when you have multiple Python versions or a virtual environment. Without it ragtag auto-detects `python3` → `python` → `py`.
+`RAGTAG_PYTHON` is useful when you have multiple Python versions or a virtual environment. Without it ragtag auto-detects `python3.12` → `python3.11` → … → `python`.
 
 ---
 
@@ -156,6 +187,8 @@ make linux-amd64  # build one target
 make clean        # remove all built binaries
 ```
 
+The pipeline and bridge Python binaries are built with PyInstaller. See [docs.crsv.es/ragtag](https://docs.crsv.es/ragtag) for a detailed write-up of the packaging process and the compatibility problems encountered with modern ML libraries.
+
 ---
 
 ## Architecture
@@ -173,10 +206,10 @@ store.py       →  processed/vector_store/  (FAISS)
             │
             ▼
         query.py   hybrid BM25 + semantic search
-        answer.py  OpenAI answer generation
+        answer.py  NIM answer generation
 ```
 
-All retrieval and embedding runs locally. Only the final answer generation step calls OpenAI.
+All retrieval and embedding runs locally. Only the final answer generation step calls the NIM API.
 
 ---
 
@@ -184,7 +217,7 @@ All retrieval and embedding runs locally. Only the final answer generation step 
 
 - Embeddings and the FAISS index never leave your machine
 - The original message data stays in `raw/` (never sent anywhere)
-- Only the assembled context for each question is sent to OpenAI
+- Only the assembled context for each question is sent to the NIM API
 
 ---
 
@@ -206,27 +239,21 @@ All retrieval and embedding runs locally. Only the final answer generation step 
 **Out of memory during pipeline**
 - Reduce batch size in `embed.py`: set `batch_size=16`
 
-**Poor search results:**
-- Try different embedding model (see Customization)
-- Increase k (number of results)
-- Adjust chunking strategy (bundle more messages)
-
-## 📈 Next Steps
-
-1. **Integrate with LLM**: Pipe `answer.py` output to Claude/GPT API
-2. **Add filters**: Filter by sender, date range, sentiment
-3. **Build UI**: Streamlit or Gradio interface
-4. **Export results**: Save answer sessions with sources
-5. **Analytics**: Track common query themes, response quality
-
-## 📚 References
-
-- **Sentence Transformers**: https://www.sbert.net/
-- **FAISS**: https://github.com/facebookresearch/faiss
-- **RAG Papers**: https://arxiv.org/abs/2005.11401
+**Poor search results**
+- Try a different embedding model (see Customization)
+- Increase k (number of retrieved results)
+- Adjust chunking strategy (bundle more messages per chunk)
 
 ---
 
-**Built with**: Python, sentence-transformers, FAISS, NumPy  
+## References
+
+- **Sentence Transformers**: https://www.sbert.net/
+- **FAISS**: https://github.com/facebookresearch/faiss
+- **RAG paper**: https://arxiv.org/abs/2005.11401
+
+---
+
+**Built with**: Python, sentence-transformers, FAISS, NumPy, Go  
 **License**: Mozilla Public License Version 2.0  
 **Author**: devin

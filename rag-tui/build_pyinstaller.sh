@@ -27,12 +27,14 @@ case "$target_os/$arch_raw" in
 esac
 
 echo "Installing pyinstaller..."
-if command -v python3.11 >/dev/null 2>&1; then
-	PY_BIN="python3.11"
-elif command -v python3.10 >/dev/null 2>&1; then
-	PY_BIN="python3.10"
-else
-	echo "Python 3.10+ is required to build PyInstaller artifacts." >&2
+for _py in python3.12 python3.11 python3.10 python3.9 python3; do
+	if command -v "$_py" >/dev/null 2>&1; then
+		PY_BIN="$_py"
+		break
+	fi
+done
+if [[ -z "${PY_BIN:-}" ]]; then
+	echo "Python 3.9+ is required to build PyInstaller artifacts." >&2
 	exit 1
 fi
 
@@ -50,21 +52,29 @@ python -m pip install --only-binary=:all: pyinstaller
 # Preferred path: use repository-pinned requirements when compatible.
 if ! python -m pip install --only-binary=:all: -r requirements.txt; then
 	echo "Pinned requirements are incompatible with $PY_BIN; using build-compatible deps..."
+	# torch 2.2.x has a frozen-exe incompatibility in torch._inductor.config
+	# (inspect.getsource fails at import time). Use >=2.4.0 to avoid it.
+	# transformers >=4.44 introduced create_import_structure_from_path() which
+	# scans .py source files at runtime — unavailable in frozen exes. Pin <4.44.
+	# torchvision is not a pipeline dependency — skip it to keep binary size down.
 	python -m pip install --only-binary=:all: \
-		"torch==2.2.2" \
-		"torchvision==0.17.2" \
+		"torch>=2.4.0" \
 		"numpy" \
 		"tqdm" \
 		"rank_bm25>=0.2.2" \
 		"openai>=1.0.0" \
 		"faiss-cpu" \
-		"transformers>=4.41.0" \
-		"sentence-transformers>=3.0.0"
+		"huggingface_hub>=0.23.0" \
+		"transformers>=4.41.0,<4.44.0" \
+		"sentence-transformers>=3.0.0,<4.0.0"
 fi
 
 echo "Building standalone binaries..."
-pyinstaller --name "bridge-${target_suffix}" --onefile bridge.py
-pyinstaller --name "pipeline-${target_suffix}" --onefile pipeline.py
+# Use spec files so the runtime hook is included automatically.
+pyinstaller bridge.spec
+cp dist/bridge "dist/bridge-${target_suffix}"
+pyinstaller pipeline.spec
+cp dist/pipeline "dist/pipeline-${target_suffix}"
 
 echo "Done! The executables are located in the dist/ directory."
 cp "dist/bridge-${target_suffix}" rag-tui/

@@ -42,7 +42,8 @@ class EmbeddingGenerator:
             texts,
             batch_size=batch_size,
             show_progress_bar=True,
-            convert_to_numpy=True
+            convert_to_numpy=True,
+            num_workers=0,  # Prevent DataLoader worker subprocesses (breaks frozen binaries)
         )
         
         return embeddings

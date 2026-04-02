@@ -71,8 +71,24 @@ def build_rag_system(
 
 
 if __name__ == '__main__':
+    import os as _os_env
+    # Suppress multiprocessing resource_tracker's "leaked semaphore" warning that
+    # appears in frozen binaries when os._exit() terminates worker processes
+    # before they can release their semaphores. The OS reclaims the resources
+    # automatically; the warning is purely cosmetic.
+    _os_env.environ.setdefault(
+        'PYTHONWARNINGS',
+        'ignore::UserWarning:multiprocessing.resource_tracker',
+    )
+
     import sys
     import glob
+    import multiprocessing
+
+    # Required by PyInstaller so that frozen-exe worker processes spawned by
+    # multiprocessing (e.g. from HuggingFace model downloads) are handled
+    # correctly rather than re-running main().
+    multiprocessing.freeze_support()
 
     input_file = sys.argv[1] if len(sys.argv) > 1 else None
     
@@ -94,3 +110,30 @@ if __name__ == '__main__':
         sys.exit(1)
 
     build_rag_system(input_file, output_dir=output_dir)
+
+    # When running as a PyInstaller frozen binary, Python's module-cleanup
+    # phase triggers re-imports of lazy-loaded transformers submodules whose
+    # native prerequisites may have already been finalised, causing noisy
+    # tracebacks even though the pipeline succeeded. os._exit() exits
+    # immediately after work is done, bypassing cleanup. Flush first so
+    # all print output is visible before the process terminates.
+    import sys as _sys
+    if getattr(_sys, 'frozen', False):
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        # Kill the multiprocessing resource_tracker background process before
+        # exiting. It otherwise detects "leaked" semaphores (created by
+        # torch internals) and prints a UserWarning after we exit. The OS
+        # reclaims those semaphores automatically when the process group dies.
+        try:
+            import multiprocessing.resource_tracker as _mrt
+            _rt = getattr(_mrt, '_resource_tracker', None)
+            if _rt is not None:
+                _pid = getattr(_rt, '_pid', None)
+                if _pid:
+                    import os as _os2, signal as _sig
+                    _os2.kill(_pid, _sig.SIGKILL)
+        except Exception:
+            pass
+        import os as _os
+        _os._exit(0)
