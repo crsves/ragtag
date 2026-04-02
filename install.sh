@@ -15,7 +15,7 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-VERSION="0.1.0"
+VERSION="0.1.2"
 REPO="crsves/ragtag"
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_METHOD=""
@@ -180,14 +180,32 @@ parse_args() {
 download_release_asset() {
     local asset_name="$1"
     local output_path="$2"
-    local github_release_url="https://github.com/${REPO}/releases/latest/download"
+    local github_latest="https://github.com/${REPO}/releases/latest/download"
     local mirror_url="https://ragtag.crsv.es/releases/latest/download"
 
-    if curl -fsSL --progress-bar "${github_release_url}/${asset_name}" -o "$output_path"; then
+    # 1. GitHub /latest/download direct redirect
+    if curl -fsSL --progress-bar "${github_latest}/${asset_name}" \
+            -o "$output_path" 2>/dev/null; then
         return 0
     fi
 
-    curl -fsSL --progress-bar "${mirror_url}/${asset_name}" -o "$output_path"
+    # 2. GitHub API: resolve the exact asset URL from releases/latest
+    #    (handles cases where /latest redirect is stale or rate-limited)
+    local api_url
+    api_url="$(
+        curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | grep -o '"browser_download_url":"[^"]*'"${asset_name}"'"' \
+        | grep -o 'https://[^"]*'
+    )"
+    if [[ -n "$api_url" ]]; then
+        if curl -fsSL --progress-bar "$api_url" -o "$output_path" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # 3. Mirror fallback
+    curl -fsSL --progress-bar "${mirror_url}/${asset_name}" \
+        -o "$output_path" 2>/dev/null
 }
 
 download_release_python_sources() {
@@ -697,19 +715,29 @@ do_release() {
     RAGTAG_DIR="$user_dir"
     mkdir -p "$RAGTAG_DIR"
 
-    local github_release_url="https://github.com/${REPO}/releases/latest/download"
     local dl_total=4
 
     # ── [1/4] TUI binary ──────────────────────────────────────────────────────
-    echo -e "  ${DIM}[1/${dl_total}]${RESET} Downloading ${BINARY_NAME} …"
-    if curl -fsSL --progress-bar \
-            "${github_release_url}/${BINARY_NAME}" \
-            -o "${RAGTAG_DIR}/${BINARY_NAME}"; then
-        chmod +x "${RAGTAG_DIR}/${BINARY_NAME}"
-        local sz; sz="$(du -sh "${RAGTAG_DIR}/${BINARY_NAME}" 2>/dev/null | cut -f1)"
-        success "${BINARY_NAME}  ${DIM}(${sz})${RESET}"
-    else
-        fatal "Failed to download ${BINARY_NAME}"
+    # Try the current naming (ragtag-*) then the legacy naming (rag-tui-*) so
+    # that older cached installers still work against newer releases and vice-versa.
+    local tui_dest="${RAGTAG_DIR}/${BINARY_NAME}"
+    local tui_downloaded=false
+    local tui_try
+    for tui_try in \
+        "ragtag-${PLATFORM_OS}-${PLATFORM_ARCH}" \
+        "rag-tui-${PLATFORM_OS}-${PLATFORM_ARCH}"; do
+        echo -e "  ${DIM}[1/${dl_total}]${RESET} Downloading ${tui_try} …"
+        if download_release_asset "$tui_try" "$tui_dest"; then
+            chmod +x "$tui_dest"
+            local sz; sz="$(du -sh "$tui_dest" 2>/dev/null | cut -f1)"
+            success "${tui_try}  ${DIM}(${sz})${RESET}"
+            tui_downloaded=true
+            break
+        fi
+        warn "Not found as ${tui_try}, trying alternate name …"
+    done
+    if [[ "$tui_downloaded" != true ]]; then
+        fatal "Could not download TUI binary for ${PLATFORM_OS}/${PLATFORM_ARCH}. Check https://github.com/${REPO}/releases for available assets."
     fi
 
     # ── [2/4] pipeline ────────────────────────────────────────────────────────
