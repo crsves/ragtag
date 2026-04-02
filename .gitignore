@@ -8,7 +8,7 @@ raw/
 nim_config.py
 .tui_state.json
 .model_nicknames.json
-rag-tui/rag-tui
+ragtag/ragtag
 discard/
 bin/.DS_Store
 .DS_Store

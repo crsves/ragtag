@@ -77,5 +77,5 @@ pyinstaller pipeline.spec
 cp dist/pipeline "dist/pipeline-${target_suffix}"
 
 echo "Done! The executables are located in the dist/ directory."
-cp "dist/bridge-${target_suffix}" rag-tui/
-cp "dist/pipeline-${target_suffix}" rag-tui/
+cp "dist/bridge-${target_suffix}" ragtag/
+cp "dist/pipeline-${target_suffix}" ragtag/

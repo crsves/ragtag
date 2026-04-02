@@ -103,19 +103,19 @@ $env:NIM_API_KEY = "nvapi-..."
 ```bash
 # Linux
 export RAG_DIR="$(pwd)"
-./rag-tui/rag-tui-linux-amd64
+./ragtag/ragtag-linux-amd64
 
 # macOS (Apple Silicon)
 export RAG_DIR="$(pwd)"
-./rag-tui/rag-tui-mac-arm64
+./ragtag/ragtag-mac-arm64
 
 # macOS (Intel)
 export RAG_DIR="$(pwd)"
-./rag-tui/rag-tui-mac-intel
+./ragtag/ragtag-mac-intel
 
 # Windows (PowerShell)
 $env:RAG_DIR = (Get-Location).Path
-.\rag-tui\rag-tui-windows.exe
+.\ragtag\ragtag-windows.exe
 ```
 
 ---
@@ -126,17 +126,17 @@ Pre-built binaries are attached to each GitHub release. The installer downloads 
 
 | Platform | Binary |
 |---|---|
-| Linux x86-64 | `pipeline-linux-amd64` · `rag-tui-linux-amd64` |
-| Linux ARM64 | `pipeline-linux-arm64` · `rag-tui-linux-arm64` |
-| macOS Apple Silicon | `pipeline-mac-arm64` · `rag-tui-mac-arm64` |
-| macOS Intel | `pipeline-mac-intel` · `rag-tui-mac-intel` |
-| Windows x64 | `pipeline-windows.exe` · `rag-tui-windows.exe` |
+| Linux x86-64 | `pipeline-linux-amd64` · `ragtag-linux-amd64` |
+| Linux ARM64 | `pipeline-linux-arm64` · `ragtag-linux-arm64` |
+| macOS Apple Silicon | `pipeline-mac-arm64` · `ragtag-mac-arm64` |
+| macOS Intel | `pipeline-mac-intel` · `ragtag-mac-intel` |
+| Windows x64 | `pipeline-windows.exe` · `ragtag-windows.exe` |
 
 On macOS you may need to allow the binary in **System Settings → Privacy & Security** the first time you run it.
 
 ```bash
 # Remove quarantine attribute if Gatekeeper blocks the binary
-xattr -d com.apple.quarantine ./rag-tui/rag-tui-mac-arm64
+xattr -d com.apple.quarantine ./ragtag/ragtag-mac-arm64
 ```
 
 ---
@@ -181,7 +181,7 @@ Only new messages are embedded and appended — the existing index is not rebuil
 Requires Go 1.21+.
 
 ```bash
-cd rag-tui
+cd ragtag
 make all          # build all 5 platform binaries
 make linux-amd64  # build one target
 make clean        # remove all built binaries
@@ -202,7 +202,7 @@ chunk.py       →  processed/chunks.json
 embed.py       →  processed/embeddings/
 store.py       →  processed/vector_store/  (FAISS)
     │
-    └── bridge.py  ←  rag-tui (Go TUI, spawns bridge as subprocess)
+    └── bridge.py  ←  ragtag (Go TUI, spawns bridge as subprocess)
             │
             ▼
         query.py   hybrid BM25 + semantic search
@@ -224,7 +224,7 @@ All retrieval and embedding runs locally. Only the final answer generation step 
 ## Troubleshooting
 
 **TUI opens but queries fail / "no index for chat"**
-- Make sure `RAG_DIR` points to the repo root, not the `rag-tui/` subfolder
+- Make sure `RAG_DIR` points to the repo root, not the `ragtag/` subfolder
 - Run `python3 pipeline.py` first to build the index
 
 **`python3` not found on Windows**
@@ -234,7 +234,7 @@ All retrieval and embedding runs locally. Only the final answer generation step 
 - The first query loads the sentence-transformer model into RAM (~150 MB). Subsequent queries are fast.
 
 **macOS: "cannot be opened because the developer cannot be verified"**
-- Run: `xattr -d com.apple.quarantine ./rag-tui/rag-tui-mac-arm64`
+- Run: `xattr -d com.apple.quarantine ./ragtag/ragtag-mac-arm64`
 
 **Out of memory during pipeline**
 - Reduce batch size in `embed.py`: set `batch_size=16`

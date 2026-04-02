@@ -620,7 +620,7 @@ detect_platform() {
         *) fatal "Unsupported operating system: ${os_raw}" ;;
     esac
 
-    BINARY_NAME="rag-tui-${PLATFORM_OS}-${PLATFORM_ARCH}"
+    BINARY_NAME="ragtag-${PLATFORM_OS}-${PLATFORM_ARCH}"
     info "Detected platform: ${PLATFORM_OS}/${PLATFORM_ARCH} → ${BOLD}${BINARY_NAME}${RESET}"
 }
 
@@ -761,9 +761,9 @@ install_binary() {
     step "Installing TUI binary"
 
     local binary_src
-    # For clone: binary lives in rag-tui/ subdir
+    # For clone: binary lives in ragtag/ subdir
     if [ "$INSTALL_METHOD" -eq 0 ]; then
-        binary_src="${RAGTAG_DIR}/rag-tui/${BINARY_NAME}"
+        binary_src="${RAGTAG_DIR}/ragtag/${BINARY_NAME}"
     else
         binary_src="${RAGTAG_DIR}/${BINARY_NAME}"
     fi
@@ -777,12 +777,12 @@ install_binary() {
                 success "Downloaded ${BINARY_NAME}"
             else
                 warn "Could not download ${BINARY_NAME}."
-                warn "You can build it yourself: cd ${RAGTAG_DIR}/rag-tui && make"
+                warn "You can build it yourself: cd ${RAGTAG_DIR}/ragtag && make"
                 return
             fi
         else
             warn "Pre-built binary not found at ${binary_src}"
-            warn "You can build it yourself: cd ${RAGTAG_DIR}/rag-tui && make"
+            warn "You can build it yourself: cd ${RAGTAG_DIR}/ragtag && make"
             return
         fi
     fi
@@ -793,13 +793,12 @@ install_binary() {
     mkdir -p "$INSTALL_DIR"
     local dest="${INSTALL_DIR}/ragtag"
 
-    # Symlink (prefer) or copy
-    if ln -sf "$binary_src" "$dest" 2>/dev/null; then
-        success "Symlinked → ${dest}"
-    else
-        cp "$binary_src" "$dest"
-        success "Copied → ${dest}"
-    fi
+    # Write a launcher script so the binary receives its full path as os.Args[0].
+    # The TUI derives ragDir from argv[0] to locate the bridge/pipeline binaries;
+    # a bare symlink would make Args[0] just the command name, breaking the lookup.
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$binary_src" > "$dest"
+    chmod +x "$dest"
+    success "Installed launcher → ${dest}"
 
     if [ "$INSTALL_METHOD" -eq 1 ] && [ -f "${RAGTAG_DIR}/pipeline" ]; then
         local pipeline_dest="${INSTALL_DIR}/ragtag-pipeline"
@@ -1134,6 +1133,14 @@ main() {
     configure_nim_key
     auto_index_demo
     print_next_steps
+
+    # Auto-launch the TUI once installation is done.
+    if [[ "$NON_INTERACTIVE" != true && -n "${RAGTAG_BIN_PATH:-}" && -x "$RAGTAG_BIN_PATH" ]]; then
+        echo -e "  ${C1}${BOLD}Launching ragtag…${RESET}"
+        echo
+        cd "$RAGTAG_DIR"
+        exec "$RAGTAG_BIN_PATH"
+    fi
 }
 
 main "$@"
