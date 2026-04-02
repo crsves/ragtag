@@ -623,10 +623,11 @@ do_release() {
     mkdir -p "$RAGTAG_DIR"
 
     local base_url="https://ragtag.crsv.es/releases/latest/download"
+    local github_release_url="https://github.com/${REPO}/releases/latest/download"
 
     info "Downloading binary (${BINARY_NAME}) …"
     curl -fsSL --progress-bar \
-        "${base_url}/${BINARY_NAME}" \
+        "${github_release_url}/${BINARY_NAME}" \
         -o "${RAGTAG_DIR}/${BINARY_NAME}"
     chmod +x "${RAGTAG_DIR}/${BINARY_NAME}"
 
@@ -669,7 +670,7 @@ install_binary() {
             warn "Pre-built binary not found at ${binary_src}"
             info "Attempting to download ${BINARY_NAME} from release assets …"
             mkdir -p "$(dirname "$binary_src")"
-            if curl -fsSL "https://ragtag.crsv.es/releases/latest/download/${BINARY_NAME}" -o "$binary_src"; then
+            if curl -fsSL "https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}" -o "$binary_src"; then
                 success "Downloaded ${BINARY_NAME}"
             else
                 warn "Could not download ${BINARY_NAME}."
