@@ -821,10 +821,9 @@ install_binary() {
     mkdir -p "$INSTALL_DIR"
     local dest="${INSTALL_DIR}/ragtag"
 
-    # Write a launcher script so the binary receives its full path as os.Args[0].
-    # The TUI derives ragDir from argv[0] to locate the bridge/pipeline binaries;
-    # a bare symlink would make Args[0] just the command name, breaking the lookup.
-    printf '#!/bin/sh\nexec "%s" "$@"\n' "$binary_src" > "$dest"
+    # Write a launcher script that embeds RAG_DIR so the TUI finds bridge/pipeline
+    # regardless of what directory the user is in when they run it.
+    printf '#!/bin/sh\nexport RAG_DIR="%s"\nexec "%s" "$@"\n' "$RAGTAG_DIR" "$binary_src" > "$dest"
     chmod +x "$dest"
     success "Installed launcher → ${dest}"
 
@@ -1100,44 +1099,6 @@ auto_index_demo() {
     fi
 }
 
-# ─── 9. Next steps ────────────────────────────────────────────────────────────
-print_next_steps() {
-    echo
-    echo -e "  ${C5}────────────────────────────────────────────────────${RESET}"
-    echo
-    echo -e "  ${C1}${BOLD}You're ready to go!${RESET}"
-    echo
-    echo -e "  ${C3}${BOLD}Quick start with the demo data:${RESET}"
-    echo
-    echo -e "  ${DIM}1.${RESET}  ${C2}cd ${RAGTAG_DIR}${RESET}"
-    if [ "$INSTALL_METHOD" -eq 0 ] || [[ "$RELEASE_PY_FALLBACK" == true ]]; then
-        echo -e "  ${DIM}2.${RESET}  ${C2}${PYTHON_CMD} pipeline.py raw/slack.json${RESET}"
-    else
-        echo -e "  ${DIM}2.${RESET}  ${C2}./pipeline raw/slack.json${RESET}"
-    fi
-    echo -e "      ${DIM}# Indexes the demo Slack data — takes ~1 minute on first run${RESET}"
-    echo -e "  ${DIM}3.${RESET}  ${C2}ragtag${RESET}"
-    echo -e "      ${DIM}# Opens the interactive TUI — ask anything about the data${RESET}"
-    echo
-    echo -e "  ${C3}${BOLD}Use your own data:${RESET}"
-    echo
-    echo -e "  ${DIM}Drop any Discord/Slack JSON export into ${RAGTAG_DIR}/raw/ then run:${RESET}"
-    if [ "$INSTALL_METHOD" -eq 0 ] || [[ "$RELEASE_PY_FALLBACK" == true ]]; then
-        echo -e "  ${C2}  ${PYTHON_CMD} pipeline.py raw/your_export.json${RESET}"
-    else
-        echo -e "  ${C2}  ./pipeline raw/your_export.json${RESET}"
-    fi
-    echo
-    if ! echo ":${PATH}:" | grep -q ":${INSTALL_DIR}:"; then
-        echo -e "  ${C3}${BOLD}PATH reminder:${RESET}"
-        echo -e "  ${DIM}Add to ~/.bashrc or ~/.zshrc:${RESET}"
-        echo -e "  ${C2}  export PATH=\"${INSTALL_DIR}:\$PATH\"${RESET}"
-        echo
-    fi
-    echo -e "  ${C5}────────────────────────────────────────────────────${RESET}"
-    echo
-}
-
 # ─── Main ────────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
@@ -1160,7 +1121,6 @@ main() {
     install_python_deps
     configure_nim_key
     auto_index_demo
-    print_next_steps
 
     # Auto-launch the TUI once installation is done.
     if [[ "$NON_INTERACTIVE" != true && -n "${RAGTAG_BIN_PATH:-}" && -x "$RAGTAG_BIN_PATH" ]]; then
