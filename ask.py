@@ -17,7 +17,6 @@ from typing import Dict, List, Optional
 
 from openai import OpenAI
 
-import nim_config
 from query import HybridRetriever, _detect_query_type
 
 # ---------------------------------------------------------------------------
@@ -120,6 +119,7 @@ def _build_context(results: List[Dict]) -> str:
 
 def _build_prompt(query: str, results: List[Dict]) -> str:
     """Fill the NIM prompt template with query + retrieved context."""
+    import nim_config
     context_text = _build_context(results)
 
     # Warn if context is suspiciously large (shouldn't happen with k=10)
@@ -150,6 +150,7 @@ Answer:"""
 
 def _call_nim(prompt: str) -> str:
     """Send prompt to Llama 3.3 70B via NIM and return the answer text."""
+    import nim_config
     from openai import OpenAI
 
     client = OpenAI(
@@ -186,7 +187,7 @@ def _call_nim(prompt: str) -> str:
 
 def ask(
     query: str,
-    k: int = nim_config.FINAL_K,
+    k: Optional[int] = None,
     window: int = 5,
     debug: bool = False,
 ) -> Dict:
@@ -209,6 +210,9 @@ def ask(
           'sources'     — list of result dicts from HybridRetriever
           'prompt'      — the prompt that was sent to the LLM
     """
+    import nim_config
+    if k is None:
+        k = nim_config.FINAL_K
     retriever = _get_retriever()
     query_type = _detect_query_type(query)
 

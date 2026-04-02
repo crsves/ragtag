@@ -18,9 +18,14 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, newline='\n', line_buffering=True)
 sys.stdin  = io.TextIOWrapper(sys.stdin.buffer,  newline='',  line_buffering=True)
 
-RAG_DIR = Path(__file__).parent
-sys.path.insert(0, str(RAG_DIR))
-os.chdir(RAG_DIR)
+if getattr(sys, 'frozen', False):
+    # Frozen binary: __file__ points to _MEIPASS temp dir, not the rag directory.
+    # The TUI launcher sets cmd.Dir = ragDir before exec, so CWD is correct.
+    RAG_DIR = Path.cwd()
+else:
+    RAG_DIR = Path(__file__).parent
+    sys.path.insert(0, str(RAG_DIR))
+    os.chdir(RAG_DIR)
 
 # Lazy imports (heavy, avoid at module level)
 ChatManager = None
