@@ -1127,6 +1127,7 @@ main() {
         echo -e "  ${C1}${BOLD}Launching ragtag…${RESET}"
         echo
         cd "$RAGTAG_DIR"
+        export RAG_DIR="$RAGTAG_DIR"
         exec "$RAGTAG_BIN_PATH"
     fi
 }
