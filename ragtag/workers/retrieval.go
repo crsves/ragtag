@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // findPython returns the first Python executable found on PATH, checking the
@@ -89,16 +90,17 @@ type bridgeResponse struct {
 
 // Bridge manages the long-running Python subprocess.
 type Bridge struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Scanner
-	ready  bool
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Scanner
+	ready   bool
+	readyCh chan struct{} // closed once {"ready": true} is received
+	ragDir  string
 }
 
-// NewBridge starts the bridge.py subprocess in ragDir and returns once the
-// process is running. The {"ready": true} line is read asynchronously — call
-// Ready() to poll.
+// NewBridge starts the bridge subprocess in ragDir and blocks until the
+// {"ready": true} handshake completes or the 30-second timeout fires.
 func NewBridge(ragDir string) (*Bridge, error) {
 	var cmd *exec.Cmd
 	bridgeExecName := "bridge"
@@ -115,7 +117,7 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		cmd = exec.Command(py, "bridge.py")
 	}
 	cmd.Dir = ragDir
-	cmd.Stderr = os.Stderr // bridge errors (Python tracebacks, etc.) are visible
+	cmd.Stderr = os.Stderr
 	setProcAttr(cmd)
 
 	stdin, err := cmd.StdinPipe()
@@ -131,14 +133,17 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("bridge start: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "[bridge] pid %d started, waiting for ready signal …\n", cmd.Process.Pid)
 
 	b := &Bridge{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewScanner(stdoutPipe),
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  bufio.NewScanner(stdoutPipe),
+		readyCh: make(chan struct{}),
+		ragDir:  ragDir,
 	}
 
-	// Read the ready signal in a goroutine so the caller isn't blocked.
+	// Read the ready signal in a goroutine.
 	go func() {
 		if b.stdout.Scan() {
 			line := b.stdout.Text()
@@ -147,9 +152,27 @@ func NewBridge(ragDir string) (*Bridge, error) {
 				b.mu.Lock()
 				b.ready = true
 				b.mu.Unlock()
+				fmt.Fprintf(os.Stderr, "[bridge] ready\n")
+				close(b.readyCh)
+				return
 			}
+			fmt.Fprintf(os.Stderr, "[bridge] unexpected first line: %s\n", line)
+		}
+		if err := b.stdout.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "[bridge] stdout read error: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "[bridge] stdout closed before ready signal\n")
 		}
 	}()
+
+	// Block until ready or timeout.
+	select {
+	case <-b.readyCh:
+		// good
+	case <-time.After(30 * time.Second):
+		killProc(cmd)
+		return nil, fmt.Errorf("bridge did not become ready within 30 s")
+	}
 
 	return b, nil
 }
@@ -159,6 +182,16 @@ func (b *Bridge) Ready() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.ready
+}
+
+// Kill terminates the bridge subprocess.
+func (b *Bridge) Kill() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stdin != nil {
+		b.stdin.Close()
+	}
+	killProc(b.cmd)
 }
 
 // sendRaw writes a request and reads the raw JSON response line.
