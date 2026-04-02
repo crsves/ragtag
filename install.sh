@@ -27,6 +27,8 @@ AUTO_YES=false
 SKIP_NIM_KEY=false
 SKIP_BANNER=false
 NIM_API_KEY_ARG=""
+RELEASE_PY_FALLBACK=false
+RAGTAG_BIN_PATH=""
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 if [[ "$SCRIPT_PATH" == "-" || "$SCRIPT_PATH" == "bash" ]]; then
     SCRIPT_DIR="$(pwd)"
@@ -161,6 +163,46 @@ parse_args() {
     if [[ "$NON_INTERACTIVE" == true && -z "$INSTALL_METHOD" ]]; then
         INSTALL_METHOD=1
     fi
+}
+
+download_release_asset() {
+    local asset_name="$1"
+    local output_path="$2"
+    local github_release_url="https://github.com/${REPO}/releases/latest/download"
+    local mirror_url="https://ragtag.crsv.es/releases/latest/download"
+
+    if curl -fsSL --progress-bar "${github_release_url}/${asset_name}" -o "$output_path"; then
+        return 0
+    fi
+
+    curl -fsSL --progress-bar "${mirror_url}/${asset_name}" -o "$output_path"
+}
+
+download_release_python_sources() {
+    local base_raw="https://raw.githubusercontent.com/${REPO}/main"
+    local files=(
+        answer.py
+        ask.py
+        bm25_search.py
+        bridge.py
+        chat_manager.py
+        chunk.py
+        embed.py
+        normalize.py
+        pipeline.py
+        query.py
+        rerank.py
+        store.py
+        update.py
+        requirements.txt
+    )
+
+    local file
+    for file in "${files[@]}"; do
+        if ! curl -fsSL "${base_raw}/${file}" -o "${RAGTAG_DIR}/${file}"; then
+            fatal "Failed to download ${file} for Python fallback mode."
+        fi
+    done
 }
 
 write_default_demo_data() {
@@ -573,6 +615,9 @@ do_clone() {
         fi
     fi
 
+    # Expand tilde if typed literally in the prompt
+    user_dir="${user_dir/#\~/$HOME}"
+
     RAGTAG_DIR="$user_dir"
 
     if [ -d "$RAGTAG_DIR" ]; then
@@ -619,10 +664,12 @@ do_release() {
         fi
     fi
 
+    # Expand tilde if typed literally in the prompt
+    user_dir="${user_dir/#\~/$HOME}"
+
     RAGTAG_DIR="$user_dir"
     mkdir -p "$RAGTAG_DIR"
 
-    local base_url="https://ragtag.crsv.es/releases/latest/download"
     local github_release_url="https://github.com/${REPO}/releases/latest/download"
 
     info "Downloading binary (${BINARY_NAME}) …"
@@ -632,16 +679,20 @@ do_release() {
     chmod +x "${RAGTAG_DIR}/${BINARY_NAME}"
 
     info "Downloading pipeline (${PLATFORM_OS}-${PLATFORM_ARCH}) …"
-    curl -fsSL --progress-bar \
-        "${base_url}/pipeline-${PLATFORM_OS}-${PLATFORM_ARCH}" \
-        -o "${RAGTAG_DIR}/pipeline"
-    chmod +x "${RAGTAG_DIR}/pipeline"
+    if download_release_asset "pipeline-${PLATFORM_OS}-${PLATFORM_ARCH}" "${RAGTAG_DIR}/pipeline"; then
+        chmod +x "${RAGTAG_DIR}/pipeline"
+    else
+        warn "No prebuilt pipeline-${PLATFORM_OS}-${PLATFORM_ARCH} asset found."
+        RELEASE_PY_FALLBACK=true
+    fi
 
     info "Downloading bridge (${PLATFORM_OS}-${PLATFORM_ARCH}) …"
-    curl -fsSL --progress-bar \
-        "${base_url}/bridge-${PLATFORM_OS}-${PLATFORM_ARCH}" \
-        -o "${RAGTAG_DIR}/bridge"
-    chmod +x "${RAGTAG_DIR}/bridge"
+    if download_release_asset "bridge-${PLATFORM_OS}-${PLATFORM_ARCH}" "${RAGTAG_DIR}/bridge"; then
+        chmod +x "${RAGTAG_DIR}/bridge"
+    else
+        warn "No prebuilt bridge-${PLATFORM_OS}-${PLATFORM_ARCH} asset found."
+        RELEASE_PY_FALLBACK=true
+    fi
 
     info "Downloading nim_config.py …"
     curl -fsSL \
@@ -649,6 +700,11 @@ do_release() {
         -o "${RAGTAG_DIR}/nim_config.py"
 
     ensure_demo_data
+
+    if [[ "$RELEASE_PY_FALLBACK" == true ]]; then
+        warn "Falling back to Python runtime for retrieval/pipeline on this platform."
+        download_release_python_sources
+    fi
 
     success "Download complete → ${RAGTAG_DIR}"
 }
@@ -685,6 +741,7 @@ install_binary() {
     fi
 
     chmod +x "$binary_src"
+    RAGTAG_BIN_PATH="$binary_src"
 
     mkdir -p "$INSTALL_DIR"
     local dest="${INSTALL_DIR}/ragtag"
@@ -718,11 +775,45 @@ install_binary() {
 
 # ─── 6. Python dependencies ───────────────────────────────────────────────────
 install_python_deps() {
-    if [ "$INSTALL_METHOD" -eq 1 ]; then
+    if [ "$INSTALL_METHOD" -eq 1 ] && [[ "$RELEASE_PY_FALLBACK" != true ]]; then
         return
     fi
-    
-    step "Installing Python dependencies"
+
+    if [ "$INSTALL_METHOD" -eq 1 ]; then
+        step "Installing Python runtime fallback"
+    else
+        step "Installing Python dependencies"
+    fi
+
+    if [[ -z "$PYTHON_CMD" ]]; then
+        local py_found=false
+        for cmd in python3.12 python3.11 python3.10 python3.9 python3 python; do
+            if command -v "$cmd" &>/dev/null; then
+                local ver
+                ver="$("$cmd" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+                local major minor
+                major="${ver%%.*}"
+                minor="${ver#*.}"
+                if [[ "$major" -gt 3 ]] || { [[ "$major" -eq 3 ]] && [[ "$minor" -ge 9 ]]; }; then
+                    PYTHON_CMD="$cmd"
+                    py_found=true
+                    success "Python ${ver} (${cmd})"
+                    break
+                fi
+            fi
+        done
+        if ! $py_found; then
+            error "Python 3.9+ not found."
+            python_install_hint
+            fatal "Python is required for fallback mode on this platform."
+        fi
+
+        if ! "$PYTHON_CMD" -m venv --help &>/dev/null; then
+            error "Python venv module not available for ${PYTHON_CMD}."
+            echo -e "  ${DIM}Ubuntu/Debian: sudo apt install python3-venv${RESET}"
+            fatal "python3-venv is required for fallback mode."
+        fi
+    fi
 
     local req="${RAGTAG_DIR}/requirements.txt"
     if [ ! -f "$req" ]; then
@@ -767,6 +858,29 @@ install_python_deps() {
             error "pip install failed. See /tmp/ragtag_pip.log for details."
             cat /tmp/ragtag_pip.log >&2
             fatal "Dependency install failed."
+        fi
+    fi
+
+    if [ "$INSTALL_METHOD" -eq 1 ] && [[ "$RELEASE_PY_FALLBACK" == true ]]; then
+        local pipeline_wrapper="${INSTALL_DIR}/ragtag-pipeline"
+        cat > "$pipeline_wrapper" <<EOF
+#!/usr/bin/env bash
+exec "${RAGTAG_DIR}/.venv/bin/python" "${RAGTAG_DIR}/pipeline.py" "\$@"
+EOF
+        chmod +x "$pipeline_wrapper"
+        success "Installed wrapper → ${pipeline_wrapper}"
+
+        if [[ -n "$RAGTAG_BIN_PATH" ]]; then
+            local ragtag_wrapper="${INSTALL_DIR}/ragtag"
+            cat > "$ragtag_wrapper" <<EOF
+#!/usr/bin/env bash
+if [ -x "${RAGTAG_DIR}/.venv/bin/python" ]; then
+    export RAGTAG_PYTHON="${RAGTAG_DIR}/.venv/bin/python"
+fi
+exec "${RAGTAG_BIN_PATH}" "\$@"
+EOF
+            chmod +x "$ragtag_wrapper"
+            success "Installed wrapper → ${ragtag_wrapper}"
         fi
     fi
 }
@@ -847,7 +961,7 @@ print_next_steps() {
     echo -e "  ${C3}${BOLD}Quick start with the demo data:${RESET}"
     echo
     echo -e "  ${DIM}1.${RESET}  ${C2}cd ${RAGTAG_DIR}${RESET}"
-    if [ "$INSTALL_METHOD" -eq 0 ]; then
+    if [ "$INSTALL_METHOD" -eq 0 ] || [[ "$RELEASE_PY_FALLBACK" == true ]]; then
         echo -e "  ${DIM}2.${RESET}  ${C2}${PYTHON_CMD} pipeline.py raw/slack.json${RESET}"
     else
         echo -e "  ${DIM}2.${RESET}  ${C2}./pipeline raw/slack.json${RESET}"
@@ -859,7 +973,7 @@ print_next_steps() {
     echo -e "  ${C3}${BOLD}Use your own data:${RESET}"
     echo
     echo -e "  ${DIM}Drop any Discord/Slack JSON export into ${RAGTAG_DIR}/raw/ then run:${RESET}"
-    if [ "$INSTALL_METHOD" -eq 0 ]; then
+    if [ "$INSTALL_METHOD" -eq 0 ] || [[ "$RELEASE_PY_FALLBACK" == true ]]; then
         echo -e "  ${C2}  ${PYTHON_CMD} pipeline.py raw/your_export.json${RESET}"
     else
         echo -e "  ${C2}  ./pipeline raw/your_export.json${RESET}"
