@@ -107,11 +107,15 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	}
 	bridgePath := filepath.Join(ragDir, bridgeExecName)
 	if _, err := os.Stat(bridgePath); err == nil {
+		fmt.Fprintf(os.Stderr, "[bridge] using binary: %s\n", bridgePath)
 		cmd = exec.Command(bridgePath)
 	} else {
-		cmd = exec.Command(findProjectPython(ragDir), "bridge.py")
+		py := findProjectPython(ragDir)
+		fmt.Fprintf(os.Stderr, "[bridge] binary not found at %s — falling back to: %s bridge.py\n", bridgePath, py)
+		cmd = exec.Command(py, "bridge.py")
 	}
 	cmd.Dir = ragDir
+	cmd.Stderr = os.Stderr // bridge errors (Python tracebacks, etc.) are visible
 	setProcAttr(cmd)
 
 	stdin, err := cmd.StdinPipe()
