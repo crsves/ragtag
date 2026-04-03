@@ -77,6 +77,14 @@ def get_retriever(slug=None):
 
 def serialize_result(r):
     chunk = r["chunk"]
+    context_window = []
+    for wc in r.get("context_window", []):
+        context_window.append({
+            "chunk_id": str(wc.get("chunk_id", "")),
+            "text": str(wc.get("text", "")),
+            "timestamp_start": str(wc.get("timestamp_start", "")),
+            "sender": str(wc.get("sender", "")),
+        })
     return {
         "rank": r.get("rank", 0),
         "score": float(r.get("score", 0)),
@@ -90,21 +98,25 @@ def serialize_result(r):
             "timestamp_start": str(chunk.get("timestamp_start", "")),
             "sender": str(chunk.get("sender", "")),
         },
+        "context_window": context_window,
     }
 
 
 def handle(req):
+    global _retriever, _retriever_chat
     cmd = req.get("cmd", "retrieve")
 
     if cmd == "retrieve":
         retriever = get_retriever(req.get("chat"))
-        results = retriever.retrieve(
+        results, debug_stats = retriever.retrieve(
             req["query"],
             final_k=req.get("k", 10),
             debug=req.get("debug", False),
+            min_results=req.get("min_results", 0),
+            score_threshold=req.get("score_threshold", 0.0),
         )
         if not results:
-            return {"results": [], "context": ""}
+            return {"results": [], "context": "", "debug_stats": debug_stats}
 
         window = req.get("window", 5)
         results = _expand_with_window(results, retriever, window)
@@ -113,7 +125,63 @@ def handle(req):
         return {
             "results": [serialize_result(r) for r in results],
             "context": context,
-            "debug_stats": getattr(retriever, "_last_stats", None),
+            "debug_stats": debug_stats,
+        }
+
+    elif cmd == "rebuild":
+        cm = get_chat_manager()
+        active = cm.get_active_slug()
+        chat = cm.get_active_chat()
+        if not chat:
+            return {"error": "no active chat"}
+        try:
+            ensure_imports()
+            from pipeline import build_rag_system
+            store_dir = str(chat.get("store_dir", ""))
+            # Find raw files for this chat
+            raw_files = chat.get("raw_files", [])
+            if not raw_files:
+                return {"error": "no raw files configured for this chat"}
+            build_rag_system(input_file=raw_files[0], output_dir=store_dir)
+            # Invalidate cached retriever
+            _retriever = None
+            _retriever_chat = None
+            return {"ok": True, "message": f"Rebuilt index for '{active}'"}
+        except Exception as e:
+            return {"error": f"rebuild failed: {e}"}
+
+    elif cmd == "ingest":
+        file_path = req.get("file", "")
+        if not file_path:
+            return {"error": "file path required"}
+        cm = get_chat_manager()
+        chat = cm.get_active_chat()
+        if not chat:
+            return {"error": "no active chat"}
+        try:
+            from update import RAGUpdater
+            store_dir = str(chat.get("store_dir", ""))
+            updater = RAGUpdater(store_dir=store_dir + "/vector_store")
+            updater.update_from_new_file(file_path)
+            _retriever = None
+            _retriever_chat = None
+            return {"ok": True, "message": f"Ingested data from '{file_path}'"}
+        except Exception as e:
+            return {"error": f"ingest failed: {e}"}
+
+    elif cmd == "test_retrieve":
+        retriever = get_retriever(req.get("chat"))
+        results, debug_stats = retriever.retrieve(
+            req["query"],
+            final_k=req.get("k", 10),
+            debug=True,
+            min_results=req.get("min_results", 0),
+            score_threshold=req.get("score_threshold", 0.0),
+        )
+        return {
+            "results": [serialize_result(r) for r in results],
+            "context": "",
+            "debug_stats": debug_stats,
         }
 
     elif cmd == "list_chats":
@@ -135,7 +203,6 @@ def handle(req):
         slug = req["slug"]
         cm = get_chat_manager()
         cm.set_active(slug)
-        global _retriever, _retriever_chat
         _retriever = None
         _retriever_chat = None
         return {"ok": True}

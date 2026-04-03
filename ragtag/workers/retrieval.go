@@ -63,16 +63,34 @@ type Result struct {
 	IsNeighbor     bool    `json:"is_neighbor"`
 	Source         string  `json:"source"`
 	Chunk          Chunk   `json:"chunk"`
+	ContextWindow  []Chunk `json:"context_window"` // surrounding messages
+}
+
+// DebugStats holds retrieval pipeline diagnostics from the Python bridge.
+type DebugStats struct {
+QueryType       string `json:"query_type"`
+FaissK          int    `json:"faiss_k"`
+BM25K           int    `json:"bm25_k"`
+FaissHits       int    `json:"faiss_hits"`
+BM25Hits        int    `json:"bm25_hits"`
+MergedPool      int    `json:"merged_pool"`
+BM25Unique      int    `json:"bm25_unique"`
+NeighborsAdded  int    `json:"neighbors_added"`
+TotalCandidates int    `json:"total_candidates"`
+Reranked        int    `json:"reranked"`
 }
 
 // bridgeRequest is the JSON sent to the bridge subprocess.
 type bridgeRequest struct {
-	Cmd    string `json:"cmd"`
-	Query  string `json:"query,omitempty"`
-	K      int    `json:"k,omitempty"`
-	Window int    `json:"window,omitempty"`
-	Debug  bool   `json:"debug,omitempty"`
-	Slug   string `json:"slug,omitempty"`
+	Cmd            string  `json:"cmd"`
+	Query          string  `json:"query,omitempty"`
+	K              int     `json:"k,omitempty"`
+	Window         int     `json:"window,omitempty"`
+	Debug          bool    `json:"debug,omitempty"`
+	Slug           string  `json:"slug,omitempty"`
+	MinResults     int     `json:"min_results,omitempty"`
+	ScoreThreshold float64 `json:"score_threshold,omitempty"`
+	File           string  `json:"file,omitempty"` // for ingest
 }
 
 // bridgeResponse is the JSON received from the bridge subprocess.
@@ -86,6 +104,8 @@ type bridgeResponse struct {
 	Active      string                 `json:"active"`
 	Slug        string                 `json:"slug"`
 	DisplayName string                 `json:"display_name"`
+	DebugStats  *DebugStats            `json:"debug_stats"`
+	Extra       map[string]interface{} `json:"-"` // parsed separately for generic fields
 }
 
 // Bridge manages the long-running Python subprocess.
@@ -109,11 +129,9 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	}
 	bridgePath := filepath.Join(ragDir, bridgeExecName)
 	if _, err := os.Stat(bridgePath); err == nil {
-		fmt.Fprintf(os.Stderr, "[bridge] using binary: %s\n", bridgePath)
 		cmd = exec.Command(bridgePath)
 	} else {
 		py := findProjectPython(ragDir)
-		fmt.Fprintf(os.Stderr, "[bridge] binary not found at %s — falling back to: %s bridge.py\n", bridgePath, py)
 		cmd = exec.Command(py, "bridge.py")
 	}
 	cmd.Dir = ragDir
@@ -133,7 +151,6 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("bridge start: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[bridge] pid %d started, waiting for ready signal …\n", cmd.Process.Pid)
 
 	b := &Bridge{
 		cmd:     cmd,
@@ -229,25 +246,75 @@ func (b *Bridge) send(req bridgeRequest) (bridgeResponse, error) {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return bridgeResponse{}, fmt.Errorf("unmarshal bridge response: %w", err)
 	}
+	// Also parse as generic map for fields not in the struct (e.g. "message").
+	var extra map[string]interface{}
+	if err := json.Unmarshal(raw, &extra); err == nil {
+		resp.Extra = extra
+	}
 	return resp, nil
 }
 
 // Retrieve runs a retrieval query and returns the results and assembled context string.
-func (b *Bridge) Retrieve(query string, k, window int, debug bool) ([]Result, string, error) {
+func (b *Bridge) Retrieve(query string, k, window int, debug bool, minResults int, scoreThreshold float64) ([]Result, string, *DebugStats, error) {
 	resp, err := b.send(bridgeRequest{
-		Cmd:    "retrieve",
-		Query:  query,
-		K:      k,
-		Window: window,
-		Debug:  debug,
+		Cmd:            "retrieve",
+		Query:          query,
+		K:              k,
+		Window:         window,
+		Debug:          debug,
+		MinResults:     minResults,
+		ScoreThreshold: scoreThreshold,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if resp.Error != "" {
-		return nil, "", fmt.Errorf("bridge error: %s", resp.Error)
+		return nil, "", nil, fmt.Errorf("bridge error: %s", resp.Error)
 	}
-	return resp.Results, resp.Context, nil
+	return resp.Results, resp.Context, resp.DebugStats, nil
+}
+
+// TestRetrieve runs a retrieval query in test mode (debug always on, no LLM).
+func (b *Bridge) TestRetrieve(query string, k int) ([]Result, *DebugStats, error) {
+	resp, err := b.send(bridgeRequest{
+		Cmd:   "test_retrieve",
+		Query: query,
+		K:     k,
+		Debug: true,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.Error != "" {
+		return nil, nil, fmt.Errorf("bridge error: %s", resp.Error)
+	}
+	return resp.Results, resp.DebugStats, nil
+}
+
+// Rebuild triggers a full index rebuild for the active chat.
+func (b *Bridge) Rebuild() (string, error) {
+	resp, err := b.send(bridgeRequest{Cmd: "rebuild"})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("bridge error: %s", resp.Error)
+	}
+	msg, _ := resp.Extra["message"].(string)
+	return msg, nil
+}
+
+// Ingest triggers an incremental ingest from a file path.
+func (b *Bridge) Ingest(filePath string) (string, error) {
+	resp, err := b.send(bridgeRequest{Cmd: "ingest", File: filePath})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("bridge error: %s", resp.Error)
+	}
+	msg, _ := resp.Extra["message"].(string)
+	return msg, nil
 }
 
 // ListChats returns all available chats and the active slug.

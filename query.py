@@ -14,7 +14,7 @@ Two retrievers are available:
 """
 import re
 import json
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from embed import EmbeddingGenerator
 from store import VectorStore
@@ -219,7 +219,9 @@ class HybridRetriever:
         expand_n: int = 2,
         final_k: int = 10,
         debug: bool = False,
-    ) -> List[Dict]:
+        min_results: int = 0,
+        score_threshold: float = 0.0,
+    ) -> Tuple[List[Dict], Dict]:
         """
         Run the full hybrid pipeline:
           1. Detect query type → adjust faiss_k / bm25_k
@@ -229,33 +231,24 @@ class HybridRetriever:
           5. Weighted candidate pool (capped per source)
           6. Neighbor expansion
           7. Cross-encoder rerank
-
-        Args:
-            query:    Search query
-            faiss_k:  Base FAISS candidate count (adjusted by query type)
-            bm25_k:   Base BM25 candidate count (adjusted by query type)
-            expand_n: Neighbor window (±expand_n chunks around each hit)
-            final_k:  Results to return after reranking
-            debug:    Print pipeline stats when True
+          8. Adaptive threshold (if min_results + score_threshold set)
 
         Returns:
-            Reranked list of result dicts, best first.
-            Each dict has: rank, score, rerank_score, chunk,
-                           is_neighbor, keyword_boosted, source (faiss/bm25/neighbor)
+            Tuple of (reranked_results, debug_stats_dict).
+            results: list of result dicts with rank, score, rerank_score, chunk,
+                     is_neighbor, keyword_boosted, source (faiss/bm25/neighbor)
+            stats:   pipeline diagnostics dict (always populated)
         """
+        stats: Dict = {}
+
         # --- 1. Query type detection → adjust weights ---
         query_type = _detect_query_type(query)
         if query_type == 'fact':
             faiss_k = max(faiss_k - 20, 20)   # 30
             bm25_k  = bm25_k + 20              # 40
-        # semantic: keep defaults (faiss_k=50, bm25_k=20)
-
-        # Always initialise stats so bridge.py can read them after retrieve().
-        self._last_stats: dict = {
-            'query_type': query_type,
-            'faiss_k': faiss_k,
-            'bm25_k': bm25_k,
-        }
+        stats['query_type'] = query_type
+        stats['faiss_k'] = faiss_k
+        stats['bm25_k'] = bm25_k
 
         if debug:
             print(f"\n[DEBUG] query_type={query_type}  faiss_k={faiss_k}  bm25_k={bm25_k}")
@@ -272,8 +265,8 @@ class HybridRetriever:
             r['source'] = 'bm25'
             r.setdefault('is_neighbor', False)
 
-        self._last_stats['faiss_hits'] = len(faiss_results)
-        self._last_stats['bm25_hits'] = len(bm25_results)
+        stats['faiss_hits'] = len(faiss_results)
+        stats['bm25_hits'] = len(bm25_results)
 
         if debug:
             print(f"[DEBUG] FAISS hits={len(faiss_results)}  BM25 hits={len(bm25_results)}")
@@ -283,7 +276,6 @@ class HybridRetriever:
         bm25_results  = _boost_keywords(bm25_results,  query)
 
         # --- 5. Weighted candidate pool (capped per source) ---
-        faiss_ids = {r['chunk']['chunk_id'] for r in faiss_results[:30]}
         seen_ids: set = set()
         merged: List[Dict] = []
 
@@ -306,8 +298,8 @@ class HybridRetriever:
                 bm25_added += 1
 
         n_bm25_only = sum(1 for r in merged if r['source'] == 'bm25')
-        self._last_stats['merged_pool'] = len(merged)
-        self._last_stats['bm25_unique'] = n_bm25_only
+        stats['merged_pool'] = len(merged)
+        stats['bm25_unique'] = n_bm25_only
 
         if debug:
             print(f"[DEBUG] merged pool={len(merged)}  bm25_unique={n_bm25_only}")
@@ -337,21 +329,30 @@ class HybridRetriever:
                     })
 
         candidates = merged + neighbors
-
-        self._last_stats['neighbors_added'] = len(neighbors)
-        self._last_stats['total_candidates'] = len(candidates)
+        stats['neighbors_added'] = len(neighbors)
+        stats['total_candidates'] = len(candidates)
 
         if debug:
             print(f"[DEBUG] neighbors added={len(neighbors)}  total candidates={len(candidates)}")
 
-        # --- 7. Rerank ---
-        reranked = self.reranker.rerank(query, candidates, top_k=final_k)
+        # --- 7. Rerank (request all when threshold filtering is active) ---
+        rerank_top_k = len(candidates) if (min_results > 0 and score_threshold > 0.0) else final_k
+        reranked = self.reranker.rerank(query, candidates, top_k=max(rerank_top_k, final_k))
 
-        self._last_stats['reranked'] = len(reranked)
+        # --- 8. Adaptive threshold: ensure at least min_results returned ---
+        if score_threshold > 0.0 and min_results > 0:
+            above = [r for r in reranked if r.get('rerank_score', r.get('score', 0)) >= score_threshold]
+            below = [r for r in reranked if r.get('rerank_score', r.get('score', 0)) < score_threshold]
+            shortfall = max(0, min_results - len(above))
+            result = (above + below[:shortfall])[:final_k]
+        else:
+            result = reranked[:final_k]
+
+        stats['reranked'] = len(result)
 
         if debug:
-            print(f"[DEBUG] reranked → top {len(reranked)} results")
-            for r in reranked[:5]:
+            print(f"[DEBUG] reranked → top {len(result)} results")
+            for r in result[:5]:
                 boosted = '★' if r.get('keyword_boosted') else ' '
                 neighbor = '[N]' if r.get('is_neighbor') else '   '
                 print(
@@ -361,7 +362,7 @@ class HybridRetriever:
                     f"{r['chunk']['text'][:60]!r}"
                 )
 
-        return reranked
+        return result, stats
 
     def get_context_window(self, chunk_id: int, window: int = 5) -> List[Dict]:
         """
@@ -419,7 +420,7 @@ if __name__ == '__main__':
 
     if args:
         query = ' '.join(args)
-        results = retriever.retrieve(query, debug=debug)
+        results, _ = retriever.retrieve(query, debug=debug)
         retriever.print_results(results, show_full_text=True)
     else:
         print("\n" + "=" * 80)
@@ -440,5 +441,5 @@ if __name__ == '__main__':
             if _debug:
                 query = query[len('debug:'):].strip()
 
-            results = retriever.retrieve(query, debug=_debug)
+            results, _ = retriever.retrieve(query, debug=_debug)
             retriever.print_results(results)

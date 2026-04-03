@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 processed/
+processed_test/
 raw/
 *.npy
 *.index
@@ -9,6 +10,12 @@ nim_config.py
 .tui_state.json
 .model_nicknames.json
 ragtag/ragtag
-discard/
+ragtag/ragtag-*
+ragtag/build_pyinstaller.sh
+rag-tui/
+build/
 bin/.DS_Store
+bin/rag-tui-mac-arm64-dev
+discard/
 .DS_Store
+CHANGES.md

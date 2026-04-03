@@ -219,7 +219,7 @@ def ask(
     if debug:
         print(f"\n[ask] query_type={query_type}  k={k}  window={window}")
 
-    results = retriever.retrieve(query, final_k=k, debug=debug)
+    results, _ = retriever.retrieve(query, final_k=k, debug=debug)
 
     if not results:
         return {
