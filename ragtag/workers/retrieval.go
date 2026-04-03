@@ -143,10 +143,15 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		ragDir:  ragDir,
 	}
 
-	// Read the ready signal in a goroutine.
+	// Read the ready signal in a goroutine, skipping any non-JSON lines
+	// (e.g. library info messages printed to stdout during initialisation).
 	go func() {
-		if b.stdout.Scan() {
+		for b.stdout.Scan() {
 			line := b.stdout.Text()
+			if len(line) == 0 || line[0] != '{' {
+				fmt.Fprintf(os.Stderr, "[bridge] non-JSON stdout: %s\n", line)
+				continue
+			}
 			var resp bridgeResponse
 			if err := json.Unmarshal([]byte(line), &resp); err == nil && resp.Ready {
 				b.mu.Lock()
@@ -156,7 +161,7 @@ func NewBridge(ragDir string) (*Bridge, error) {
 				close(b.readyCh)
 				return
 			}
-			fmt.Fprintf(os.Stderr, "[bridge] unexpected first line: %s\n", line)
+			fmt.Fprintf(os.Stderr, "[bridge] unexpected line before ready: %s\n", line)
 		}
 		if err := b.stdout.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "[bridge] stdout read error: %v\n", err)
@@ -209,14 +214,18 @@ func (b *Bridge) sendRaw(req bridgeRequest) ([]byte, error) {
 		return nil, fmt.Errorf("write to bridge: %w", err)
 	}
 
-	if !b.stdout.Scan() {
-		if err := b.stdout.Err(); err != nil {
-			return nil, fmt.Errorf("read bridge response: %w", err)
+	// Skip non-JSON lines (library init messages, log output, etc.)
+	for b.stdout.Scan() {
+		line := b.stdout.Text()
+		if len(line) > 0 && line[0] == '{' {
+			return []byte(line), nil
 		}
-		return nil, fmt.Errorf("bridge stdout closed unexpectedly")
+		fmt.Fprintf(os.Stderr, "[bridge] non-JSON stdout: %s\n", line)
 	}
-
-	return []byte(b.stdout.Text()), nil
+	if err := b.stdout.Err(); err != nil {
+		return nil, fmt.Errorf("read bridge response: %w", err)
+	}
+	return nil, fmt.Errorf("bridge stdout closed unexpectedly")
 }
 
 // send writes a request and decodes the response into a bridgeResponse.
