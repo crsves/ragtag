@@ -37,14 +37,31 @@ class ChatManager:
 
     def _load_or_init(self) -> dict:
         self.chats_dir.mkdir(parents=True, exist_ok=True)
+
+        legacy_store = self.rag_dir / "processed" / "vector_store"
+        legacy_chunks = self.rag_dir / "processed" / "chunks.json"
+
         if self.registry_path.exists():
-            return json.loads(self.registry_path.read_text())
+            reg = json.loads(self.registry_path.read_text())
+            # Self-heal: if registry has no chats but the legacy vector store
+            # exists (e.g. written empty before pipeline completed, or after a
+            # reinstall), auto-register it so the user doesn't see "no chats".
+            if not reg.get("chats") and legacy_store.exists():
+                reg["chats"]["default"] = {
+                    "display_name": "Default",
+                    "store_dir": str(legacy_store),
+                    "chunks_file": str(legacy_chunks),
+                    "raw_file": None,
+                    "created_at": datetime.now().isoformat(),
+                    "last_updated": datetime.now().isoformat(),
+                }
+                reg["active"] = "default"
+                self._write(reg)
+            return reg
 
         reg = {"active": None, "chats": {}}
 
         # Auto-register legacy single store if present
-        legacy_store = self.rag_dir / "processed" / "vector_store"
-        legacy_chunks = self.rag_dir / "processed" / "chunks.json"
         if legacy_store.exists():
             reg["chats"]["default"] = {
                 "display_name": "Default",

@@ -183,9 +183,9 @@ download_release_asset() {
     local github_latest="https://github.com/${REPO}/releases/latest/download"
     local mirror_url="https://ragtag.crsv.es/releases/latest/download"
 
-    # 1. GitHub /latest/download direct redirect — show progress bar on stderr
-    if curl -fL --progress-bar "${github_latest}/${asset_name}" \
-            -o "$output_path" 2>&1; then
+    # 1. GitHub /latest/download direct redirect
+    if curl -fsSL "${github_latest}/${asset_name}" \
+            -o "$output_path" 2>/dev/null; then
         return 0
     fi
     rm -f "$output_path" 2>/dev/null || true
@@ -199,15 +199,15 @@ download_release_asset() {
         | grep -o 'https://[^"]*'
     )"
     if [[ -n "$api_url" ]]; then
-        if curl -fL --progress-bar "$api_url" -o "$output_path" 2>&1; then
+        if curl -fsSL "$api_url" -o "$output_path" 2>/dev/null; then
             return 0
         fi
         rm -f "$output_path" 2>/dev/null || true
     fi
 
-    # 3. Mirror fallback — show progress bar
-    if curl -fL --progress-bar "${mirror_url}/${asset_name}" \
-            -o "$output_path" 2>&1; then
+    # 3. Mirror fallback
+    if curl -fsSL "${mirror_url}/${asset_name}" \
+            -o "$output_path" 2>/dev/null; then
         return 0
     fi
     rm -f "$output_path" 2>/dev/null || true
@@ -732,14 +732,16 @@ do_release() {
     for tui_try in \
         "ragtag-${PLATFORM_OS}-${PLATFORM_ARCH}" \
         "rag-tui-${PLATFORM_OS}-${PLATFORM_ARCH}"; do
-        echo -e "  ${DIM}[1/${dl_total}]${RESET} Downloading ${tui_try} …"
+        start_spinner "[1/${dl_total}] Downloading ${tui_try} …"
         if download_release_asset "$tui_try" "$tui_dest"; then
+            stop_spinner
             chmod +x "$tui_dest"
             local sz; sz="$(du -sh "$tui_dest" 2>/dev/null | cut -f1)"
             success "${tui_try}  ${DIM}(${sz})${RESET}"
             tui_downloaded=true
             break
         fi
+        stop_spinner
         warn "Not found as ${tui_try}, trying alternate name …"
     done
     if [[ "$tui_downloaded" != true ]]; then
@@ -747,23 +749,27 @@ do_release() {
     fi
 
     # ── [2/4] pipeline ────────────────────────────────────────────────────────
-    echo -e "  ${DIM}[2/${dl_total}]${RESET} Downloading pipeline …"
+    start_spinner "[2/${dl_total}] Downloading pipeline …"
     if download_release_asset "pipeline-${PLATFORM_OS}-${PLATFORM_ARCH}" "${RAGTAG_DIR}/pipeline"; then
+        stop_spinner
         chmod +x "${RAGTAG_DIR}/pipeline"
         local sz; sz="$(du -sh "${RAGTAG_DIR}/pipeline" 2>/dev/null | cut -f1)"
         success "pipeline  ${DIM}(${sz})${RESET}"
     else
+        stop_spinner
         warn "No prebuilt pipeline for this platform — will use Python fallback."
         RELEASE_PY_FALLBACK=true
     fi
 
     # ── [3/4] bridge ──────────────────────────────────────────────────────────
-    echo -e "  ${DIM}[3/${dl_total}]${RESET} Downloading bridge …"
+    start_spinner "[3/${dl_total}] Downloading bridge …"
     if download_release_asset "bridge-${PLATFORM_OS}-${PLATFORM_ARCH}" "${RAGTAG_DIR}/bridge"; then
+        stop_spinner
         chmod +x "${RAGTAG_DIR}/bridge"
         local sz; sz="$(du -sh "${RAGTAG_DIR}/bridge" 2>/dev/null | cut -f1)"
         success "bridge  ${DIM}(${sz})${RESET}"
     else
+        stop_spinner
         warn "No prebuilt bridge for this platform — will use Python fallback."
         RELEASE_PY_FALLBACK=true
     fi
