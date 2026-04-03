@@ -177,18 +177,31 @@ parse_args() {
     fi
 }
 
+# Populated by download_release_asset — MB/s of the successful transfer
+DOWNLOAD_SPEED_MBPS=""
+
+_curl_timed() {
+    # _curl_timed <url> <output_path>
+    # Sets DOWNLOAD_SPEED_MBPS and returns curl's exit code.
+    local url="$1" out="$2"
+    local speed_bps
+    speed_bps="$(curl -fsSL "$url" -o "$out" \
+        --write-out '%{speed_download}' 2>/dev/null)" || { rm -f "$out" 2>/dev/null; return 1; }
+    # Convert bytes/s → MB/s with one decimal
+    DOWNLOAD_SPEED_MBPS="$(awk "BEGIN{printf \"%.1f\", ${speed_bps:-0}/1048576}")"
+}
+
 download_release_asset() {
     local asset_name="$1"
     local output_path="$2"
     local github_latest="https://github.com/${REPO}/releases/latest/download"
     local mirror_url="https://ragtag.crsv.es/releases/latest/download"
+    DOWNLOAD_SPEED_MBPS=""
 
     # 1. GitHub /latest/download direct redirect
-    if curl -fsSL "${github_latest}/${asset_name}" \
-            -o "$output_path" 2>/dev/null; then
+    if _curl_timed "${github_latest}/${asset_name}" "$output_path"; then
         return 0
     fi
-    rm -f "$output_path" 2>/dev/null || true
 
     # 2. GitHub API: resolve the exact asset URL from releases/latest
     #    (handles cases where /latest redirect is stale or rate-limited)
@@ -199,19 +212,25 @@ download_release_asset() {
         | grep -o 'https://[^"]*'
     )"
     if [[ -n "$api_url" ]]; then
-        if curl -fsSL "$api_url" -o "$output_path" 2>/dev/null; then
+        if _curl_timed "$api_url" "$output_path"; then
             return 0
         fi
-        rm -f "$output_path" 2>/dev/null || true
     fi
 
     # 3. Mirror fallback
-    if curl -fsSL "${mirror_url}/${asset_name}" \
-            -o "$output_path" 2>/dev/null; then
+    if _curl_timed "${mirror_url}/${asset_name}" "$output_path"; then
         return 0
     fi
     rm -f "$output_path" 2>/dev/null || true
     return 1
+}
+
+# Strip macOS quarantine so Gatekeeper doesn't kill downloaded binaries
+_unquarantine() {
+    local f="$1"
+    if command -v xattr &>/dev/null; then
+        xattr -dr com.apple.quarantine "$f" 2>/dev/null || true
+    fi
 }
 
 download_release_python_sources() {
@@ -736,8 +755,11 @@ do_release() {
         if download_release_asset "$tui_try" "$tui_dest"; then
             stop_spinner
             chmod +x "$tui_dest"
+            _unquarantine "$tui_dest"
             local sz; sz="$(du -sh "$tui_dest" 2>/dev/null | cut -f1)"
-            success "${tui_try}  ${DIM}(${sz})${RESET}"
+            local spd="${DOWNLOAD_SPEED_MBPS:-}"
+            [[ -n "$spd" ]] && spd="  ${DIM}${spd} MB/s${RESET}" || spd=""
+            success "${tui_try}  ${DIM}(${sz})${RESET}${spd}"
             tui_downloaded=true
             break
         fi
@@ -753,8 +775,11 @@ do_release() {
     if download_release_asset "pipeline-${PLATFORM_OS}-${PLATFORM_ARCH}" "${RAGTAG_DIR}/pipeline"; then
         stop_spinner
         chmod +x "${RAGTAG_DIR}/pipeline"
+        _unquarantine "${RAGTAG_DIR}/pipeline"
         local sz; sz="$(du -sh "${RAGTAG_DIR}/pipeline" 2>/dev/null | cut -f1)"
-        success "pipeline  ${DIM}(${sz})${RESET}"
+        local spd="${DOWNLOAD_SPEED_MBPS:-}"
+        [[ -n "$spd" ]] && spd="  ${DIM}${spd} MB/s${RESET}" || spd=""
+        success "pipeline  ${DIM}(${sz})${RESET}${spd}"
     else
         stop_spinner
         warn "No prebuilt pipeline for this platform — will use Python fallback."
@@ -766,8 +791,11 @@ do_release() {
     if download_release_asset "bridge-${PLATFORM_OS}-${PLATFORM_ARCH}" "${RAGTAG_DIR}/bridge"; then
         stop_spinner
         chmod +x "${RAGTAG_DIR}/bridge"
+        _unquarantine "${RAGTAG_DIR}/bridge"
         local sz; sz="$(du -sh "${RAGTAG_DIR}/bridge" 2>/dev/null | cut -f1)"
-        success "bridge  ${DIM}(${sz})${RESET}"
+        local spd="${DOWNLOAD_SPEED_MBPS:-}"
+        [[ -n "$spd" ]] && spd="  ${DIM}${spd} MB/s${RESET}" || spd=""
+        success "bridge  ${DIM}(${sz})${RESET}${spd}"
     else
         stop_spinner
         warn "No prebuilt bridge for this platform — will use Python fallback."
