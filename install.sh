@@ -198,12 +198,17 @@ download_release_asset() {
     local mirror_url="https://ragtag.crsv.es/releases/latest/download"
     DOWNLOAD_SPEED_MBPS=""
 
-    # 1. GitHub /latest/download direct redirect
+    # 1. Mirror (always up-to-date, no rate limits)
+    if _curl_timed "${mirror_url}/${asset_name}" "$output_path"; then
+        return 0
+    fi
+
+    # 2. GitHub /latest/download direct redirect
     if _curl_timed "${github_latest}/${asset_name}" "$output_path"; then
         return 0
     fi
 
-    # 2. GitHub API: resolve the exact asset URL from releases/latest
+    # 3. GitHub API: resolve the exact asset URL from releases/latest
     #    (handles cases where /latest redirect is stale or rate-limited)
     local api_url
     api_url="$(
@@ -215,11 +220,6 @@ download_release_asset() {
         if _curl_timed "$api_url" "$output_path"; then
             return 0
         fi
-    fi
-
-    # 3. Mirror fallback
-    if _curl_timed "${mirror_url}/${asset_name}" "$output_path"; then
-        return 0
     fi
     rm -f "$output_path" 2>/dev/null || true
     return 1

@@ -113,6 +113,7 @@ def handle(req):
         return {
             "results": [serialize_result(r) for r in results],
             "context": context,
+            "debug_stats": getattr(retriever, "_last_stats", None),
         }
 
     elif cmd == "list_chats":

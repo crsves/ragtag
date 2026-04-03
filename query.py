@@ -250,6 +250,13 @@ class HybridRetriever:
             bm25_k  = bm25_k + 20              # 40
         # semantic: keep defaults (faiss_k=50, bm25_k=20)
 
+        # Always initialise stats so bridge.py can read them after retrieve().
+        self._last_stats: dict = {
+            'query_type': query_type,
+            'faiss_k': faiss_k,
+            'bm25_k': bm25_k,
+        }
+
         if debug:
             print(f"\n[DEBUG] query_type={query_type}  faiss_k={faiss_k}  bm25_k={bm25_k}")
 
@@ -264,6 +271,9 @@ class HybridRetriever:
         for r in bm25_results:
             r['source'] = 'bm25'
             r.setdefault('is_neighbor', False)
+
+        self._last_stats['faiss_hits'] = len(faiss_results)
+        self._last_stats['bm25_hits'] = len(bm25_results)
 
         if debug:
             print(f"[DEBUG] FAISS hits={len(faiss_results)}  BM25 hits={len(bm25_results)}")
@@ -295,8 +305,11 @@ class HybridRetriever:
                 merged.append(r)
                 bm25_added += 1
 
+        n_bm25_only = sum(1 for r in merged if r['source'] == 'bm25')
+        self._last_stats['merged_pool'] = len(merged)
+        self._last_stats['bm25_unique'] = n_bm25_only
+
         if debug:
-            n_bm25_only = sum(1 for r in merged if r['source'] == 'bm25')
             print(f"[DEBUG] merged pool={len(merged)}  bm25_unique={n_bm25_only}")
 
         # --- 6. Neighbor expansion (capped at 30 new chunks) ---
@@ -325,11 +338,16 @@ class HybridRetriever:
 
         candidates = merged + neighbors
 
+        self._last_stats['neighbors_added'] = len(neighbors)
+        self._last_stats['total_candidates'] = len(candidates)
+
         if debug:
             print(f"[DEBUG] neighbors added={len(neighbors)}  total candidates={len(candidates)}")
 
         # --- 7. Rerank ---
         reranked = self.reranker.rerank(query, candidates, top_k=final_k)
+
+        self._last_stats['reranked'] = len(reranked)
 
         if debug:
             print(f"[DEBUG] reranked → top {len(reranked)} results")
