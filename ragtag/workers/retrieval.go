@@ -117,7 +117,7 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		cmd = exec.Command(py, "bridge.py")
 	}
 	cmd.Dir = ragDir
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.Discard // prevent bridge subprocess output from corrupting TUI
 	setProcAttr(cmd)
 
 	stdin, err := cmd.StdinPipe()
@@ -149,24 +149,16 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		for b.stdout.Scan() {
 			line := b.stdout.Text()
 			if len(line) == 0 || line[0] != '{' {
-				fmt.Fprintf(os.Stderr, "[bridge] non-JSON stdout: %s\n", line)
-				continue
+				continue // skip library init noise silently
 			}
 			var resp bridgeResponse
 			if err := json.Unmarshal([]byte(line), &resp); err == nil && resp.Ready {
 				b.mu.Lock()
 				b.ready = true
 				b.mu.Unlock()
-				fmt.Fprintf(os.Stderr, "[bridge] ready\n")
 				close(b.readyCh)
 				return
 			}
-			fmt.Fprintf(os.Stderr, "[bridge] unexpected line before ready: %s\n", line)
-		}
-		if err := b.stdout.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "[bridge] stdout read error: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "[bridge] stdout closed before ready signal\n")
 		}
 	}()
 
@@ -214,13 +206,12 @@ func (b *Bridge) sendRaw(req bridgeRequest) ([]byte, error) {
 		return nil, fmt.Errorf("write to bridge: %w", err)
 	}
 
-	// Skip non-JSON lines (library init messages, log output, etc.)
+	// Skip non-JSON lines (library init messages, log output, etc.) silently.
 	for b.stdout.Scan() {
 		line := b.stdout.Text()
 		if len(line) > 0 && line[0] == '{' {
 			return []byte(line), nil
 		}
-		fmt.Fprintf(os.Stderr, "[bridge] non-JSON stdout: %s\n", line)
 	}
 	if err := b.stdout.Err(); err != nil {
 		return nil, fmt.Errorf("read bridge response: %w", err)

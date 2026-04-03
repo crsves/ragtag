@@ -183,11 +183,12 @@ download_release_asset() {
     local github_latest="https://github.com/${REPO}/releases/latest/download"
     local mirror_url="https://ragtag.crsv.es/releases/latest/download"
 
-    # 1. GitHub /latest/download direct redirect
-    if curl -fsSL --progress-bar "${github_latest}/${asset_name}" \
-            -o "$output_path" 2>/dev/null; then
+    # 1. GitHub /latest/download direct redirect — show progress bar on stderr
+    if curl -fL --progress-bar "${github_latest}/${asset_name}" \
+            -o "$output_path" 2>&1; then
         return 0
     fi
+    rm -f "$output_path" 2>/dev/null || true
 
     # 2. GitHub API: resolve the exact asset URL from releases/latest
     #    (handles cases where /latest redirect is stale or rate-limited)
@@ -198,14 +199,19 @@ download_release_asset() {
         | grep -o 'https://[^"]*'
     )"
     if [[ -n "$api_url" ]]; then
-        if curl -fsSL --progress-bar "$api_url" -o "$output_path" 2>/dev/null; then
+        if curl -fL --progress-bar "$api_url" -o "$output_path" 2>&1; then
             return 0
         fi
+        rm -f "$output_path" 2>/dev/null || true
     fi
 
-    # 3. Mirror fallback
-    curl -fsSL --progress-bar "${mirror_url}/${asset_name}" \
-        -o "$output_path" 2>/dev/null
+    # 3. Mirror fallback — show progress bar
+    if curl -fL --progress-bar "${mirror_url}/${asset_name}" \
+            -o "$output_path" 2>&1; then
+        return 0
+    fi
+    rm -f "$output_path" 2>/dev/null || true
+    return 1
 }
 
 download_release_python_sources() {
