@@ -14,8 +14,8 @@ ragtag/ragtag-*
 ragtag/build_pyinstaller.sh
 rag-tui/
 build/
-bin/.DS_Store
-bin/rag-tui-mac-arm64-dev
+bin/
+ragtag/rag-tui
 discard/
 .DS_Store
 CHANGES.md
