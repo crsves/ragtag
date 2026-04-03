@@ -874,7 +874,7 @@ func (m *AppModel) handleSettingsMenuKey(msg tea.KeyMsg) []tea.Cmd {
                 if item.screen == ScreenChatList {
                         m.screen = ScreenChatList
                         m.chatFileCursor = 0
-                        return []tea.Cmd{loadChatFileListCmd(m.bridge)}
+                        return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
                 }
                 m.screen = item.screen
                 m.settingsCursor = 0
@@ -1824,7 +1824,7 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 	case "/view":
 		m.screen = ScreenChatList
 		m.chatFileCursor = 0
-		return []tea.Cmd{loadChatFileListCmd(m.bridge)}
+		return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
 
 	case "/minresults":
 		if len(parts) > 1 {
@@ -3171,27 +3171,124 @@ func sortedSlugs(chats map[string]interface{}) []string {
 
 // ─── Chat file list screen ────────────────────────────────────────────────────
 
-func loadChatFileListCmd(b *workers.Bridge) tea.Cmd {
+func loadChatFileListCmd(ragDir string) tea.Cmd {
 	return func() tea.Msg {
-		if b == nil {
-			return ChatFileListMsg{Err: fmt.Errorf("bridge not initialised")}
+		dir := filepath.Join(ragDir, "raw")
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return ChatFileListMsg{Err: fmt.Errorf("raw/ dir not found: %w", err)}
 		}
-		files, err := b.ListRawFiles()
-		return ChatFileListMsg{Files: files, Err: err}
+		var files []string
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+				files = append(files, e.Name())
+			}
+		}
+		sort.Strings(files)
+		return ChatFileListMsg{Files: files}
 	}
 }
 
-func loadChatFileCmd(b *workers.Bridge, filename string) tea.Cmd {
+func loadChatFileCmd(ragDir, filename string) tea.Cmd {
 	return func() tea.Msg {
-		if b == nil {
-			return ChatFileLoadedMsg{Err: fmt.Errorf("bridge not initialised")}
-		}
-		msgs, err := b.ReadRawFile(filename)
+		path := filepath.Join(ragDir, "raw", filepath.Base(filename))
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return ChatFileLoadedMsg{Err: err}
 		}
-		return ChatFileLoadedMsg{Title: filename, Content: formatChatForViewer(msgs)}
+		msgs, err := parseChatJSON(data)
+		if err != nil {
+			return ChatFileLoadedMsg{Err: fmt.Errorf("parse: %w", err)}
+		}
+		const maxMsgs = 5000
+		truncated := false
+		if len(msgs) > maxMsgs {
+			msgs = msgs[:maxMsgs]
+			truncated = true
+		}
+		content := formatChatForViewer(msgs)
+		if truncated {
+			content += "\n" + ui.HelpStyle.Render(fmt.Sprintf("  (showing first %d messages)", maxMsgs))
+		}
+		return ChatFileLoadedMsg{Title: filename, Content: content}
 	}
+}
+
+// parseChatJSON normalizes any chat JSON format into ViewerMessages.
+func parseChatJSON(data []byte) ([]workers.ViewerMessage, error) {
+	extractMsg := func(m map[string]interface{}) (workers.ViewerMessage, bool) {
+		sender, _ := m["sender"].(string)
+		for _, k := range []string{"from", "author", "name", "from_name", "username"} {
+			if sender == "" {
+				sender, _ = m[k].(string)
+			}
+		}
+		if s, ok := m["sender"].(map[string]interface{}); ok {
+			for _, k := range []string{"nickname", "username", "name"} {
+				if v, _ := s[k].(string); v != "" {
+					sender = v
+					break
+				}
+			}
+		}
+		text, _ := m["text"].(string)
+		for _, k := range []string{"content", "message", "body"} {
+			if text == "" {
+				text, _ = m[k].(string)
+			}
+		}
+		ts, _ := m["timestamp"].(string)
+		for _, k := range []string{"date", "time", "created_at", "ts", "date_unixtime"} {
+			if ts == "" {
+				ts, _ = m[k].(string)
+			}
+		}
+		if text == "" {
+			return workers.ViewerMessage{}, false
+		}
+		if sender == "" {
+			sender = "?"
+		}
+		return workers.ViewerMessage{Sender: sender, Text: text, Timestamp: ts}, true
+	}
+
+	toMsgs := func(items []interface{}) []workers.ViewerMessage {
+		var out []workers.ViewerMessage
+		for _, item := range items {
+			if m, ok := item.(map[string]interface{}); ok {
+				if msg, ok := extractMsg(m); ok {
+					out = append(out, msg)
+				}
+			}
+		}
+		return out
+	}
+
+	// Try direct array.
+	var arr []interface{}
+	if json.Unmarshal(data, &arr) == nil {
+		return toMsgs(arr), nil
+	}
+
+	// Try object with known wrapper keys.
+	var obj map[string]interface{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"messages", "msgs", "chats", "data"} {
+		if v, ok := obj[key]; ok {
+			if items, ok := v.([]interface{}); ok {
+				return toMsgs(items), nil
+			}
+		}
+	}
+	// Fall back to first array value in the object.
+	for _, v := range obj {
+		if items, ok := v.([]interface{}); ok {
+			return toMsgs(items), nil
+		}
+	}
+	return nil, fmt.Errorf("no message array found in JSON")
 }
 
 // formatChatForViewer renders a slice of ViewerMessages into styled text for the viewport.
@@ -3265,7 +3362,7 @@ func (m *AppModel) handleChatListKey(msg tea.KeyMsg) []tea.Cmd {
 	case tea.KeyEnter:
 		if len(m.chatFileList) > 0 {
 			filename := m.chatFileList[m.chatFileCursor]
-			return []tea.Cmd{loadChatFileCmd(m.bridge, filename)}
+			return []tea.Cmd{loadChatFileCmd(m.ragDir, filename)}
 		}
 	}
 	return nil

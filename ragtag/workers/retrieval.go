@@ -166,6 +166,8 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		readyCh: make(chan struct{}),
 		ragDir:  ragDir,
 	}
+	// Increase scanner buffer to 32 MB to handle large bridge responses.
+	b.stdout.Buffer(make([]byte, 64*1024), 32*1024*1024)
 
 	// Read the ready signal in a goroutine, skipping any non-JSON lines
 	// (e.g. library info messages printed to stdout during initialisation).
