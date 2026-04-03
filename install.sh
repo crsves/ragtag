@@ -15,7 +15,7 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-VERSION="0.1.2"
+VERSION="0.1.3"
 REPO="crsves/ragtag"
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_METHOD=""
