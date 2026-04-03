@@ -66,6 +66,13 @@ type Result struct {
 	ContextWindow  []Chunk `json:"context_window"` // surrounding messages
 }
 
+// ViewerMessage is a normalized chat message for display in the chat file viewer.
+type ViewerMessage struct {
+	Sender    string `json:"sender"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"`
+}
+
 // DebugStats holds retrieval pipeline diagnostics from the Python bridge.
 type DebugStats struct {
 QueryType       string `json:"query_type"`
@@ -363,6 +370,44 @@ func (b *Bridge) Stats() (map[string]interface{}, error) {
 	}
 
 	return m, nil
+}
+
+// ListRawFiles returns the filenames of raw JSON chat files available to view.
+func (b *Bridge) ListRawFiles() ([]string, error) {
+	raw, err := b.sendRaw(bridgeRequest{Cmd: "list_raw_files"})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Files []string `json:"files"`
+		Error string   `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal list_raw_files: %w", err)
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("bridge error: %s", resp.Error)
+	}
+	return resp.Files, nil
+}
+
+// ReadRawFile reads and normalizes a raw chat JSON file into ViewerMessages.
+func (b *Bridge) ReadRawFile(filename string) ([]ViewerMessage, error) {
+	raw, err := b.sendRaw(bridgeRequest{Cmd: "read_raw_file", File: filename})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Messages []ViewerMessage `json:"messages"`
+		Error    string          `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal read_raw_file: %w", err)
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("bridge error: %s", resp.Error)
+	}
+	return resp.Messages, nil
 }
 
 // Close shuts down the bridge subprocess gracefully.

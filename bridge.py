@@ -102,6 +102,37 @@ def serialize_result(r):
     }
 
 
+def _parse_chat_messages(data):
+    """Normalize various chat JSON formats to [{sender, text, timestamp}]."""
+    if isinstance(data, dict):
+        items = None
+        for key in ("messages", "msgs", "chats", "data"):
+            if key in data and isinstance(data[key], list):
+                items = data[key]
+                break
+        if items is None:
+            items = next((v for v in data.values() if isinstance(v, list)), [])
+    elif isinstance(data, list):
+        items = data
+    else:
+        return []
+
+    result = []
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        sender = (m.get("sender") or m.get("from") or m.get("author") or
+                  m.get("name") or m.get("from_name") or m.get("username") or "?")
+        if isinstance(sender, dict):
+            sender = sender.get("nickname") or sender.get("username") or sender.get("name") or "?"
+        text = (m.get("text") or m.get("content") or m.get("message") or m.get("body") or "")
+        ts = (m.get("timestamp") or m.get("date") or m.get("time") or
+              m.get("created_at") or m.get("ts") or m.get("date_unixtime") or "")
+        if text:
+            result.append({"sender": str(sender)[:32], "text": str(text), "timestamp": str(ts)})
+    return result
+
+
 def handle(req):
     global _retriever, _retriever_chat
     cmd = req.get("cmd", "retrieve")
@@ -238,6 +269,29 @@ def handle(req):
             "created_at": chat.get("created_at", "?"),
             "last_updated": chat.get("last_updated", "?"),
         }
+
+    elif cmd == "list_raw_files":
+        raw_dir = RAG_DIR / "raw"
+        if raw_dir.is_dir():
+            files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".json"))
+        else:
+            files = []
+        return {"files": files}
+
+    elif cmd == "read_raw_file":
+        filename = req.get("file", "")
+        if not filename:
+            return {"error": "file required"}
+        filename = os.path.basename(filename)  # sanitize
+        raw_path = RAG_DIR / "raw" / filename
+        if not raw_path.is_file():
+            return {"error": f"file not found: {filename}"}
+        try:
+            data = json.loads(raw_path.read_text(encoding="utf-8"))
+            messages = _parse_chat_messages(data)
+            return {"messages": messages}
+        except Exception as e:
+            return {"error": f"read failed: {e}"}
 
     else:
         return {"error": f"unknown cmd: {cmd}"}

@@ -29,6 +29,8 @@ const (
 	ScreenAPISettings                       // API settings (key, url)
 	ScreenInterfaceSettings                 // interface toggles
 	ScreenPipeline                          // pipeline management
+	ScreenChatList                          // raw chat file browser
+	ScreenChatViewer                        // paged chat message viewer
 )
 
 // ChatMessage is one entry in the visible chat log.

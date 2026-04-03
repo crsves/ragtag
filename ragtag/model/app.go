@@ -75,6 +75,19 @@ type StatsMsg struct {
 	Err   error
 }
 
+// ChatFileListMsg carries the list of raw chat JSON files.
+type ChatFileListMsg struct {
+	Files []string
+	Err   error
+}
+
+// ChatFileLoadedMsg carries a fully-formatted chat file ready for the viewer.
+type ChatFileLoadedMsg struct {
+	Title   string
+	Content string
+	Err     error
+}
+
 // ─── Autocomplete commands ───────────────────────────────────────────────────
 
 // cmdSuggestion is one slash-command entry shown in the autocomplete popup.
@@ -99,6 +112,7 @@ var allCommands = []cmdSuggestion{
 	{"/help", "show command reference", 9},
 	{"/stats", "show index statistics", 10},
 	{"/pipeline", "open pipeline management", 10},
+	{"/view", "browse raw chat history", 10},
 	{"/confident", "toggle confident mode", 11},
 	{"/thinking", "toggle thinking mode", 12},
 	{"/rag", "toggle RAG-only mode (skip LLM)", 13},
@@ -197,6 +211,7 @@ var settingsMenuItems = []struct {
 	{"Interface", ScreenInterfaceSettings, ""},
 	{"Index Stats", 0, "stats"},
 	{"Pipeline", ScreenPipeline, ""},
+	{"Browse Chats", ScreenChatList, ""},
 	{"Help", ScreenHelp, ""},
 }
 
@@ -298,6 +313,12 @@ type AppModel struct {
 	pipelineInput     string // text typed in pipeline input mode
 	pipelinePrompt    string // what we're asking for ("query" or "file")
 
+	// Chat file viewer
+	chatFileList   []string
+	chatFileCursor int
+	chatViewVP     viewport.Model
+	chatViewTitle  string
+
 	// Chat switcher cursor
 	chatCursor int
 
@@ -370,6 +391,9 @@ func New() AppModel {
 	// Help pager viewport (sized at first WindowSizeMsg)
 	helpVp := viewport.New(80, 20)
 
+	// Chat file viewer viewport (sized at first WindowSizeMsg)
+	chatViewVP := viewport.New(80, 20)
+
 	// Spinner
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -387,6 +411,7 @@ func New() AppModel {
 	m := AppModel{
 		viewport:       vp,
 		helpVp:         helpVp,
+		chatViewVP:     chatViewVP,
 		textarea:       ta,
 		spinner:        sp,
 		appState:       StateStarting,
@@ -454,6 +479,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.helpVp.Width = m.helpVpWidth()
 		m.helpVp.Height = m.helpVpHeight()
 		m.helpVp.SetContent(m.buildHelpContent())
+		m.chatViewVP.Width = m.chatViewVpWidth()
+		m.chatViewVP.Height = m.chatViewVpHeight()
 		m.renderMessages()
 
 	// ── Spinner tick ───────────────────────────────────────────────────────
@@ -663,6 +690,30 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("[pipeline/%s]\n%s", msg.Action, msg.Message)})
 		}
 
+	// ── Chat file list ─────────────────────────────────────────────────────
+	case ChatFileListMsg:
+		if msg.Err != nil {
+			m.addMessage(ChatMessage{Role: "error", Content: "Could not list raw files: " + msg.Err.Error()})
+			m.screen = ScreenChat
+		} else {
+			m.chatFileList = msg.Files
+			m.chatFileCursor = 0
+		}
+
+	// ── Chat file loaded ───────────────────────────────────────────────────
+	case ChatFileLoadedMsg:
+		if msg.Err != nil {
+			m.addMessage(ChatMessage{Role: "error", Content: "Could not load file: " + msg.Err.Error()})
+			m.screen = ScreenChatList
+		} else {
+			m.chatViewTitle = msg.Title
+			m.chatViewVP.Width = m.chatViewVpWidth()
+			m.chatViewVP.Height = m.chatViewVpHeight()
+			m.chatViewVP.SetContent(msg.Content)
+			m.chatViewVP.GotoTop()
+			m.screen = ScreenChatViewer
+		}
+
 	// ── Key events ─────────────────────────────────────────────────────────
 	case tea.KeyMsg:
 		// Global quit
@@ -697,6 +748,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleModelPickerKey(msg)...)
 		case ScreenNick:
 			cmds = append(cmds, m.handleNickKey(msg)...)
+		case ScreenChatList:
+			cmds = append(cmds, m.handleChatListKey(msg)...)
+		case ScreenChatViewer:
+			cmds = append(cmds, m.handleChatViewerKey(msg)...)
 		}
 	}
 
@@ -712,6 +767,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.screen == ScreenChat && !m.acConsumedKey {
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
+	}
+	// Chat viewer viewport scroll.
+	if m.screen == ScreenChatViewer && !m.acConsumedKey {
+		var vpCmd tea.Cmd
+		m.chatViewVP, vpCmd = m.chatViewVP.Update(msg)
 		cmds = append(cmds, vpCmd)
 	}
 	m.acConsumedKey = false
@@ -809,6 +870,11 @@ func (m *AppModel) handleSettingsMenuKey(msg tea.KeyMsg) []tea.Cmd {
                 if item.action == "stats" {
                         m.screen = ScreenChat
                         return []tea.Cmd{fetchStatsCmd(m.bridge)}
+                }
+                if item.screen == ScreenChatList {
+                        m.screen = ScreenChatList
+                        m.chatFileCursor = 0
+                        return []tea.Cmd{loadChatFileListCmd(m.bridge)}
                 }
                 m.screen = item.screen
                 m.settingsCursor = 0
@@ -1755,6 +1821,11 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.pipelineInputMode = false
 		m.pipelineInput = ""
 
+	case "/view":
+		m.screen = ScreenChatList
+		m.chatFileCursor = 0
+		return []tea.Cmd{loadChatFileListCmd(m.bridge)}
+
 	case "/minresults":
 		if len(parts) > 1 {
 			if n, err := strconv.Atoi(parts[1]); err == nil && n >= 0 {
@@ -2234,6 +2305,10 @@ func (m AppModel) viewMain() string {
 		content = m.viewInterfaceSettingsContent()
 	case ScreenPipeline:
 		content = m.viewPipelineContent()
+	case ScreenChatList:
+		content = m.viewChatListContent()
+	case ScreenChatViewer:
+		content = m.viewChatViewerContent()
 	case ScreenChats:
 		content = m.viewChatsContent()
 	case ScreenHelp:
@@ -2515,6 +2590,7 @@ func (m AppModel) buildHelpContent() string {
 		{"/rag", "toggle RAG-only mode (skip LLM)"},
 		{"/pause", "pause / cancel the current AI operation"},
 		{"/pipeline", "open pipeline management screen"},
+		{"/view", "browse and read raw chat JSON files"},
 		{"/chats", "switch between chats"},
 		{"/settings", "open settings categories"},
 		{"/stats", "show index statistics"},
@@ -3091,4 +3167,190 @@ func sortedSlugs(chats map[string]interface{}) []string {
 		}
 	}
 	return slugs
+}
+
+// ─── Chat file list screen ────────────────────────────────────────────────────
+
+func loadChatFileListCmd(b *workers.Bridge) tea.Cmd {
+	return func() tea.Msg {
+		if b == nil {
+			return ChatFileListMsg{Err: fmt.Errorf("bridge not initialised")}
+		}
+		files, err := b.ListRawFiles()
+		return ChatFileListMsg{Files: files, Err: err}
+	}
+}
+
+func loadChatFileCmd(b *workers.Bridge, filename string) tea.Cmd {
+	return func() tea.Msg {
+		if b == nil {
+			return ChatFileLoadedMsg{Err: fmt.Errorf("bridge not initialised")}
+		}
+		msgs, err := b.ReadRawFile(filename)
+		if err != nil {
+			return ChatFileLoadedMsg{Err: err}
+		}
+		return ChatFileLoadedMsg{Title: filename, Content: formatChatForViewer(msgs)}
+	}
+}
+
+// formatChatForViewer renders a slice of ViewerMessages into styled text for the viewport.
+func formatChatForViewer(msgs []workers.ViewerMessage) string {
+	if len(msgs) == 0 {
+		return ui.SystemMsgStyle.Render("  (no messages found in this file)")
+	}
+
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	senderStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	dayStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
+	var sb strings.Builder
+	currentDay := ""
+
+	for _, m := range msgs {
+		ts := m.Timestamp
+		day := ""
+		if len(ts) >= 10 {
+			day = ts[:10]
+		}
+		if day != "" && day != currentDay {
+			currentDay = day
+			sb.WriteString("\n" + dayStyle.Render("  ── "+day+" ──") + "\n\n")
+		}
+
+		timeStr := ""
+		if len(ts) >= 16 {
+			timeStr = ts[11:16]
+		} else if len(ts) > 10 {
+			timeStr = ts[10:]
+		}
+
+		sender := m.Sender
+		if len(sender) > 18 {
+			sender = sender[:18]
+		}
+
+		timeRendered := dimStyle.Render(fmt.Sprintf("[%s]", timeStr))
+		senderRendered := senderStyle.Render(fmt.Sprintf("%-18s", sender))
+
+		// Split on newlines in the message itself.
+		lines := strings.Split(strings.TrimRight(m.Text, "\n"), "\n")
+		indent := strings.Repeat(" ", 2+7+2+18+2) // matches prefix width
+		for i, line := range lines {
+			if i == 0 {
+				sb.WriteString("  " + timeRendered + "  " + senderRendered + "  " + textStyle.Render(line) + "\n")
+			} else if strings.TrimSpace(line) != "" {
+				sb.WriteString(indent + textStyle.Render(line) + "\n")
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+func (m *AppModel) handleChatListKey(msg tea.KeyMsg) []tea.Cmd {
+	m.acConsumedKey = true
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenSettingsMenu
+	case tea.KeyUp:
+		if m.chatFileCursor > 0 {
+			m.chatFileCursor--
+		}
+	case tea.KeyDown:
+		if m.chatFileCursor < len(m.chatFileList)-1 {
+			m.chatFileCursor++
+		}
+	case tea.KeyEnter:
+		if len(m.chatFileList) > 0 {
+			filename := m.chatFileList[m.chatFileCursor]
+			return []tea.Cmd{loadChatFileCmd(m.bridge, filename)}
+		}
+	}
+	return nil
+}
+
+func (m AppModel) viewChatListContent() string {
+	var sb strings.Builder
+	sb.WriteString(ui.TitleStyle.Render("Browse Raw Chat Files") + "\n\n")
+
+	if len(m.chatFileList) == 0 {
+		sb.WriteString(ui.SystemMsgStyle.Render("  Loading…") + "\n")
+	} else {
+		for i, f := range m.chatFileList {
+			isSelected := i == m.chatFileCursor
+			marker := "  "
+			label := f
+			if isSelected {
+				marker = ui.ActiveFlagStyle.Render("▶ ")
+				label = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(f)
+			} else {
+				label = ui.SystemMsgStyle.Render(f)
+			}
+			sb.WriteString(fmt.Sprintf("%s%s\n", marker, label))
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: open · ESC: back"))
+	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
+		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
+	)
+}
+
+// ─── Chat viewer screen ───────────────────────────────────────────────────────
+
+func (m *AppModel) handleChatViewerKey(msg tea.KeyMsg) []tea.Cmd {
+	m.acConsumedKey = true
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenChatList
+	case tea.KeyUp:
+		m.chatViewVP.LineUp(1)
+	case tea.KeyDown:
+		m.chatViewVP.LineDown(1)
+	case tea.KeyPgUp:
+		m.chatViewVP.HalfViewUp()
+	case tea.KeyPgDown:
+		m.chatViewVP.HalfViewDown()
+	case tea.KeyHome:
+		m.chatViewVP.GotoTop()
+	case tea.KeyEnd:
+		m.chatViewVP.GotoBottom()
+	}
+	return nil
+}
+
+func (m AppModel) viewChatViewerContent() string {
+	pct := 0
+	if m.chatViewVP.TotalLineCount() > 0 {
+		pct = int(m.chatViewVP.ScrollPercent() * 100)
+	}
+	title := ui.TitleStyle.Render(m.chatViewTitle)
+	scroll := ui.HelpStyle.Render(fmt.Sprintf("%d%%", pct))
+	header := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", scroll)
+	inner := header + "\n\n" + m.chatViewVP.View() + "\n\n" +
+		ui.HelpStyle.Render("↑↓ / PgUp/PgDn: scroll · Home/End: top/bottom · ESC: back")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ui.ColorCyan).
+		Padding(0, 1).
+		Width(m.width - 2).
+		Render(inner)
+}
+
+func (m AppModel) chatViewVpHeight() int {
+	h := m.height - 4 - 2 - 5 // total - input/status - border - header+footer
+	if h < 3 {
+		return 3
+	}
+	return h
+}
+
+func (m AppModel) chatViewVpWidth() int {
+	w := m.width - 2 - 4 // outer Width(m.width-2) minus border(2)+padding(2)
+	if w < 20 {
+		return 20
+	}
+	return w
 }
