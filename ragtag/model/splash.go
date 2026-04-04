@@ -20,13 +20,10 @@ func animTickCmd() tea.Cmd {
 }
 
 // ragtagLogo is the ASCII word-art shown beside the rabbit on startup.
-// Generated with pyfiglet "standard" font — g descenders properly aligned.
-const ragtagLogo = "                 _              \n" +
-	" _ __ __ _  __ _| |_ __ _  __ _ \n" +
-	"| '__/ _` |/ _` | __/ _` |/ _` |\n" +
-	"| | | (_| | (_| | || (_| | (_| |\n" +
-	"|_|  \\__,_|\\__, |\\__\\__,_|\\__, |\n" +
-	"           |___/          |___/ "
+const ragtagLogo = "_________   _______  __________ _________   _______  __________\n" +
+	"|    _o___) /   O   \\/   /_____//__     __\\ /   O   \\/   /_____/\n" +
+	"|___|\\____\\/___/%\\___\\___\\%%%%.]`%%|___|%%'/___/%\\___\\___\\%%%%.]  \n" +
+	" `BB' `BBB'`BB'   `BB'`BBBBBBBB'    `B'    `BB'   `BB'`BBBBBBBB'"
 
 // viewSplash renders the animated rabbit above the ragtag wordmark on startup.
 func (m AppModel) viewSplash() string {
