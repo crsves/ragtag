@@ -81,6 +81,11 @@ type CheckResultMsg struct {
 	Err  error
 }
 
+// UpdateMsg carries the result of a self-update attempt.
+type UpdateMsg struct {
+	Err error
+}
+
 // ChatFileListMsg carries the list of raw chat JSON files.
 type ChatFileListMsg struct {
 	Files []string
@@ -110,6 +115,7 @@ var allCommands = []cmdSuggestion{
 	{"/sources", "toggle source table in replies", 2},
 	{"/agent", "toggle / run agentic mode", 3},
 	{"/pause", "pause/stop current AI response", 3},
+	{"/update", "update ragtag to the latest version", 3},
 	{"/mode", "set output mode: plain / structured / rich", 4},
 	{"/model", "set model by name/number/nickname", 4},
 	{"/k", "set final_k (chunks passed to LLM)", 5},
@@ -798,6 +804,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenChat
 			m.addMessage(ChatMessage{Role: "system", Content: sb.String()})
 		}
+
+	// ── Self-update ────────────────────────────────────────────────────────
+	case UpdateMsg:
+		if msg.Err != nil {
+			m.addMessage(ChatMessage{Role: "error", Content: "Update failed: " + msg.Err.Error()})
+		} else {
+			accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+			dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
+			m.addMessage(ChatMessage{Role: "system", Content: accentStyle.Render("✓  Updated!") + "  " + dimStyle.Render("Restart ragtag to use the new version.")})
+		}
+
+
 
 	// ── Chat file loaded ───────────────────────────────────────────────────
 	case ChatFileLoadedMsg:
@@ -2032,6 +2050,10 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 	case "/pause":
 		m.pauseCurrentOp()
 
+	case "/update":
+		m.addMessage(ChatMessage{Role: "system", Content: "checking for update…"})
+		return []tea.Cmd{selfUpdateCmd()}
+
 	case "/pipeline":
 		m.screen = ScreenPipeline
 		m.pipelineCursor = 0
@@ -2928,6 +2950,7 @@ func (m AppModel) buildHelpContent() string {
 		{"/mode structured", "JSON: summary + key_points"},
 		{"/mode rich", "rich components: chat logs, tables, timelines"},
 		{"/pause", "pause / cancel the current AI operation"},
+		{"/update", "download and install the latest ragtag binary"},
 		{"/pipeline", "open pipeline management screen"},
 		{"/ingest", "pick a file from raw/ and ingest it"},
 		{"/check", "show what date range to export next"},
