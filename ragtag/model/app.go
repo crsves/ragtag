@@ -371,6 +371,13 @@ type AppModel struct {
 
 	// Startup animation
 	animFrame int
+
+	// RAG-only chunk browser
+	ragBrowseChunks []workers.Result
+	ragBrowseCursor int
+	ragBrowseVP     viewport.Model
+	ragBrowseCtxVP  viewport.Model
+	ragBrowseCtxOpen bool
 }
 
 // crashLog appends a timestamped message to crash.log in the ragDir (or ~/ragtag, ~/raa).
@@ -953,6 +960,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleChatListKey(msg)...)
 		case ScreenChatViewer:
 			cmds = append(cmds, m.handleChatViewerKey(msg)...)
+		case ScreenRagBrowser:
+			cmds = append(cmds, m.handleRagBrowserKey(msg)...)
 		}
 	}
 
@@ -1017,6 +1026,13 @@ func (m *AppModel) handleChatKey(msg tea.KeyMsg) []tea.Cmd {
 	case tea.KeyDown:
 		if m.acActive && len(m.acSuggestions) > 0 {
 			m.acSelected = (m.acSelected + 1) % len(m.acSuggestions)
+			m.acConsumedKey = true
+			return nil
+		}
+
+	case tea.KeyRunes:
+		if string(msg.Runes) == "b" && len(m.ragBrowseChunks) > 0 && m.textarea.Value() == "" {
+			m.openRagBrowser()
 			m.acConsumedKey = true
 			return nil
 		}
@@ -2319,6 +2335,8 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 	cfg := m.settings.ToLLMConfig()
 
 	return func() (msg tea.Msg) {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
 		defer func() {
 			if r := recover(); r != nil {
 				crashLog("panic in runAgentStepCmd: %v\n%s", r, debug2.Stack())
@@ -2348,7 +2366,7 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 			{Role: openai.ChatMessageRoleUser, Content: prompt},
 		}
 
-		resp, err := workers.CallLLM(context.Background(), cfg, messages)
+		resp, err := workers.CallLLM(ctx, cfg, messages)
 		if err != nil {
 			return AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[LLM error: %v]", err)}
 		}
@@ -2365,6 +2383,8 @@ func (m *AppModel) forceAgentAnswerCmd() tea.Cmd {
 	cfg := m.settings.ToLLMConfig()
 
 	return func() tea.Msg {
+		llmCtx, llmCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer llmCancel()
 		ctxText := accumulated
 		if ctxText == "" {
 			ctxText = "(no context retrieved)"
@@ -2378,7 +2398,7 @@ func (m *AppModel) forceAgentAnswerCmd() tea.Cmd {
 			{Role: openai.ChatMessageRoleUser, Content: prompt},
 		}
 
-		resp, err := workers.CallLLM(context.Background(), cfg, messages)
+		resp, err := workers.CallLLM(llmCtx, cfg, messages)
 		if err != nil {
 			resp = fmt.Sprintf("[LLM error: %v]", err)
 		}
@@ -2518,10 +2538,22 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 		}
 
 		m.appState = StateIdle
+		// Store results for the interactive browser.
+		m.ragBrowseChunks = make([]workers.Result, len(m.streamSources))
+		copy(m.ragBrowseChunks, m.streamSources)
+		m.ragBrowseCursor = 0
+		m.ragBrowseCtxOpen = false
 		m.addMessage(ChatMessage{
 			Role:        "assistant",
 			Content:     sb.String(),
 			Sources:     m.streamSources,
+			Prerendered: true,
+		})
+		// Hint message
+		hintStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+		m.addMessage(ChatMessage{
+			Role:        "system",
+			Content:     hintStyle.Render("↑↓ navigate chunks  ·  Enter view context  ·  press B to open browser"),
 			Prerendered: true,
 		})
 		m.streamSources = nil
@@ -2759,6 +2791,8 @@ func (m AppModel) viewMain() string {
 		content = m.viewChatListContent()
 	case ScreenChatViewer:
 		content = m.viewChatViewerContent()
+	case ScreenRagBrowser:
+		content = m.viewRagBrowserContent()
 	case ScreenChats:
 		content = m.viewChatsContent()
 	case ScreenHelp:
@@ -4111,4 +4145,229 @@ func (m AppModel) chatViewVpWidth() int {
 		return 20
 	}
 	return w
+}
+
+// ─── RAG browser ──────────────────────────────────────────────────────────────
+
+func (m *AppModel) openRagBrowser() {
+if len(m.ragBrowseChunks) == 0 {
+return
+}
+m.ragBrowseCursor = 0
+m.ragBrowseCtxOpen = false
+vpH := m.height - 8 // full-screen minus borders/status
+if vpH < 5 {
+vpH = 5
+}
+m.ragBrowseVP = viewport.New(m.width-4, vpH)
+m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+m.screen = ScreenRagBrowser
+}
+
+func (m *AppModel) renderRagBrowserList() string {
+accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
+rankStyle   := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+scoreStyle  := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+starStyle   := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+srcStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+textStyle   := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
+cardWidth := m.width - 6
+if cardWidth < 52 {
+cardWidth = 52
+}
+innerWidth := cardWidth - 6
+
+var parts []string
+for i, r := range m.ragBrowseChunks {
+score := r.RerankScore
+if score == 0 {
+score = r.Score
+}
+const barLen = 10
+filled := int(score * float64(barLen))
+if filled > barLen {
+filled = barLen
+}
+bar := scoreStyle.Render(strings.Repeat("█", filled)) +
+dimStyle.Render(strings.Repeat("░", barLen-filled))
+
+star := dimStyle.Render("·")
+if r.KeywordBoosted {
+star = starStyle.Render("★")
+}
+ts := r.Chunk.TimestampStart
+if len(ts) > 19 {
+ts = ts[:19]
+}
+meta := rankStyle.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
+bar + "  " +
+scoreStyle.Render(fmt.Sprintf("%.4f", score)) + "  " +
+star + "  " +
+srcStyle.Render(r.Source) + "  " +
+dimStyle.Render(ts)
+
+text := strings.Join(strings.Fields(r.Chunk.Text), " ")
+maxLen := innerWidth * 4
+if maxLen < 80 {
+maxLen = 80
+}
+if len(text) > maxLen {
+text = text[:maxLen] + "…"
+}
+runes := []rune(text)
+var lines []string
+for len(runes) > innerWidth {
+cut := innerWidth
+for cut > 0 && runes[cut] != ' ' {
+cut--
+}
+if cut == 0 {
+cut = innerWidth
+}
+lines = append(lines, string(runes[:cut]))
+runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
+}
+if len(runes) > 0 {
+lines = append(lines, string(runes))
+}
+
+sep  := dimStyle.Render(strings.Repeat("─", innerWidth))
+body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
+
+borderColor := ui.ColorDim
+if i == m.ragBrowseCursor {
+borderColor = ui.ColorCyan
+body = accentStyle.Render("▶ ") + body
+}
+
+card := lipgloss.NewStyle().
+Border(lipgloss.RoundedBorder()).
+BorderForeground(borderColor).
+Padding(0, 1).
+Width(cardWidth).
+Render(body)
+
+if i > 0 {
+parts = append(parts, "")
+}
+parts = append(parts, card)
+}
+return strings.Join(parts, "\n")
+}
+
+func (m *AppModel) renderRagBrowserCtx() string {
+if m.ragBrowseCursor >= len(m.ragBrowseChunks) {
+return ""
+}
+r := m.ragBrowseChunks[m.ragBrowseCursor]
+
+titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+dimStyle   := lipgloss.NewStyle().Foreground(ui.ColorDim)
+userStyle  := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+tsStyle    := lipgloss.NewStyle().Foreground(ui.ColorYellow)
+textStyle  := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
+cardWidth := m.width - 6
+innerWidth := cardWidth - 6
+
+var lines []string
+title := titleStyle.Render(fmt.Sprintf("Context window — chunk #%d", m.ragBrowseCursor+1))
+lines = append(lines, title)
+lines = append(lines, dimStyle.Render(strings.Repeat("─", innerWidth)))
+
+if len(r.ContextWindow) == 0 {
+// Fall back to the chunk itself.
+lines = append(lines, textStyle.Render(r.Chunk.Text))
+} else {
+for _, c := range r.ContextWindow {
+ts := c.TimestampStart
+if len(ts) > 19 {
+ts = ts[:19]
+}
+prefix := userStyle.Render(c.Sender) + "  " + tsStyle.Render(ts) + "  "
+lines = append(lines, prefix+textStyle.Render(c.Text))
+}
+}
+return strings.Join(lines, "\n")
+}
+
+func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
+m.acConsumedKey = true
+switch msg.Type {
+case tea.KeyEsc:
+if m.ragBrowseCtxOpen {
+m.ragBrowseCtxOpen = false
+} else {
+m.screen = ScreenChat
+}
+case tea.KeyUp:
+if m.ragBrowseCtxOpen {
+m.ragBrowseCtxVP.LineUp(3)
+} else {
+if m.ragBrowseCursor > 0 {
+m.ragBrowseCursor--
+m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+}
+}
+case tea.KeyDown:
+if m.ragBrowseCtxOpen {
+m.ragBrowseCtxVP.LineDown(3)
+} else {
+if m.ragBrowseCursor < len(m.ragBrowseChunks)-1 {
+m.ragBrowseCursor++
+m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+}
+}
+case tea.KeyPgUp:
+if m.ragBrowseCtxOpen {
+m.ragBrowseCtxVP.HalfViewUp()
+} else {
+m.ragBrowseVP.HalfViewUp()
+}
+case tea.KeyPgDown:
+if m.ragBrowseCtxOpen {
+m.ragBrowseCtxVP.HalfViewDown()
+} else {
+m.ragBrowseVP.HalfViewDown()
+}
+case tea.KeyEnter:
+if !m.ragBrowseCtxOpen && m.ragBrowseCursor < len(m.ragBrowseChunks) {
+vpH := m.height - 10
+if vpH < 5 {
+vpH = 5
+}
+m.ragBrowseCtxVP = viewport.New(m.width-6, vpH)
+m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
+m.ragBrowseCtxVP.GotoTop()
+m.ragBrowseCtxOpen = true
+}
+}
+return nil
+}
+
+func (m AppModel) viewRagBrowserContent() string {
+dimStyle   := lipgloss.NewStyle().Foreground(ui.ColorDim)
+titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+
+n := len(m.ragBrowseChunks)
+title := titleStyle.Render(fmt.Sprintf("Chunk Browser  (%d/%d)", m.ragBrowseCursor+1, n))
+help  := dimStyle.Render("↑↓ move · Enter view context · Esc back")
+
+var inner string
+if m.ragBrowseCtxOpen {
+ctxTitle := titleStyle.Render(fmt.Sprintf("Context — chunk #%d", m.ragBrowseCursor+1))
+ctxHelp  := dimStyle.Render("↑↓ / PgUp/PgDn scroll · Esc back to list")
+inner = ctxTitle + "\n" + m.ragBrowseCtxVP.View() + "\n" + ctxHelp
+} else {
+inner = title + "\n" + m.ragBrowseVP.View() + "\n" + help
+}
+
+return lipgloss.NewStyle().
+Border(lipgloss.RoundedBorder()).
+BorderForeground(ui.ColorCyan).
+Padding(0, 1).
+Width(m.width - 2).
+Render(inner)
 }
