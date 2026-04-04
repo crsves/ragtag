@@ -314,10 +314,15 @@ type AppModel struct {
 	pipelinePrompt    string // what we're asking for ("query" or "file")
 
 	// Chat file viewer
-	chatFileList   []string
-	chatFileCursor int
-	chatViewVP     viewport.Model
-	chatViewTitle  string
+	chatFileList      []string
+	chatFileCursor    int
+	chatViewVP        viewport.Model
+	chatViewTitle     string
+	chatViewContent   string // rendered content stored for search
+	chatViewSearchMode bool
+	chatViewSearchTerm string
+	chatViewMatchLines []int
+	chatViewMatchIdx   int
 
 	// Chat switcher cursor
 	chatCursor int
@@ -518,37 +523,70 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamSources = msg.Results
 		if m.tuiState.Debug {
+			keyStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+			valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+			dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+			rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+			starStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+
 			var sb strings.Builder
 			if msg.DebugStats != nil {
 				ds := msg.DebugStats
-				sb.WriteString(fmt.Sprintf("[DEBUG] query_type=%-8s  faiss_k=%d  bm25_k=%d", ds.QueryType, ds.FaissK, ds.BM25K))
-				sb.WriteString(fmt.Sprintf("\n[DEBUG] FAISS hits=%-4d  BM25 hits=%d", ds.FaissHits, ds.BM25Hits))
-				sb.WriteString(fmt.Sprintf("\n[DEBUG] merged pool=%-4d  bm25_unique=%d", ds.MergedPool, ds.BM25Unique))
-				sb.WriteString(fmt.Sprintf("\n[DEBUG] neighbors added=%-4d  total candidates=%d", ds.NeighborsAdded, ds.TotalCandidates))
-				sb.WriteString(fmt.Sprintf("\n[DEBUG] reranked → top %d results", ds.Reranked))
+				sb.WriteString(keyStyle.Render("  query_type") + dimStyle.Render(" = ") + valStyle.Render(ds.QueryType) + "\n")
+				sb.WriteString(keyStyle.Render("  faiss_k   ") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.FaissK)) +
+					"   " + keyStyle.Render("bm25_k") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.BM25K)) + "\n")
+				sb.WriteString(keyStyle.Render("  FAISS hits") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.FaissHits)) +
+					"   " + keyStyle.Render("BM25 hits") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.BM25Hits)) + "\n")
+				sb.WriteString(keyStyle.Render("  merged    ") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.MergedPool)) +
+					"   " + keyStyle.Render("bm25_unique") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.BM25Unique)) + "\n")
+				sb.WriteString(keyStyle.Render("  neighbors ") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.NeighborsAdded)) +
+					"   " + keyStyle.Render("candidates") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.TotalCandidates)) + "\n")
+				sb.WriteString(keyStyle.Render("  reranked  ") + dimStyle.Render(" → ") + valStyle.Render(fmt.Sprintf("top %d", ds.Reranked)) + "\n")
 			} else {
-				sb.WriteString(fmt.Sprintf("[DEBUG] retrieved %d chunks, context %d chars", len(msg.Results), len(msg.Context)))
+				sb.WriteString(keyStyle.Render("  retrieved") + dimStyle.Render(" = ") +
+					valStyle.Render(fmt.Sprintf("%d chunks, %d chars context", len(msg.Results), len(msg.Context))) + "\n")
 			}
+			m.addMessage(ChatMessage{Role: "system", Content: "debug · retrieval stats\n" + sb.String()})
+
+			// Results table — in debug mode show up to 10 with full detail.
 			limit := len(msg.Results)
 			if limit > 10 {
 				limit = 10
 			}
-			for i, r := range msg.Results[:limit] {
-				score := r.RerankScore
-				if score == 0 {
-					score = r.Score
+			if limit > 0 {
+				var rb strings.Builder
+				rb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s  %s", "#", "score", "★", "src", "timestamp", "text")) + "\n")
+				rb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
+				for i, r := range msg.Results[:limit] {
+					score := r.RerankScore
+					if score == 0 {
+						score = r.Score
+					}
+					star := " "
+					if r.KeywordBoosted {
+						star = starStyle.Render("★")
+					}
+					src := r.Source
+					if len(src) > 7 {
+						src = src[:7]
+					}
+					ts := r.Chunk.TimestampStart
+					if len(ts) > 19 {
+						ts = ts[:19]
+					}
+					text := r.Chunk.Text
+					maxText := 55
+					if len(text) > maxText {
+						text = text[:maxText] + "…"
+					}
+					rb.WriteString(
+						rankStyle.Render(fmt.Sprintf("  %2d", i+1)) +
+							valStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
+							star +
+							valStyle.Render(fmt.Sprintf("  %-8s %-19s  %s", src, ts, text)) + "\n")
 				}
-				star := " "
-				if r.KeywordBoosted {
-					star = "★"
-				}
-				text := r.Chunk.Text
-				if len(text) > 60 {
-					text = text[:60] + "…"
-				}
-				sb.WriteString(fmt.Sprintf("\n  [%d] %s  rerank=%.4f src=%-6s  '%s'", i+1, star, score, r.Source, text))
+				m.addMessage(ChatMessage{Role: "system", Content: "debug · top results\n" + rb.String()})
 			}
-			m.addMessage(ChatMessage{Role: "system", Content: sb.String()})
 		}
 		cmds = append(cmds, m.startStreamingCmd(msg.Context)...)
 
@@ -630,16 +668,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content: fmt.Sprintf("[retrieved %d chunks, top=%.3f]", msg.NumResults, msg.TopScore),
 		})
 		if m.tuiState.Debug {
+			keyStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+			valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+			dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 			var sb strings.Builder
 			if msg.DebugStats != nil {
 				ds := msg.DebugStats
-				sb.WriteString(fmt.Sprintf("query_type=%s  faiss_k=%d  bm25_k=%d", ds.QueryType, ds.FaissK, ds.BM25K))
-				sb.WriteString(fmt.Sprintf("\nFAISS hits=%d  BM25 hits=%d", ds.FaissHits, ds.BM25Hits))
-				sb.WriteString(fmt.Sprintf("\nmerged pool=%d  bm25_unique=%d", ds.MergedPool, ds.BM25Unique))
-				sb.WriteString(fmt.Sprintf("\nneighbors added=%d  total candidates=%d", ds.NeighborsAdded, ds.TotalCandidates))
-				sb.WriteString(fmt.Sprintf("\nreranked → top %d results", ds.Reranked))
+				sb.WriteString(keyStyle.Render("  query_type") + dimStyle.Render(" = ") + valStyle.Render(ds.QueryType) + "\n")
+				sb.WriteString(keyStyle.Render("  FAISS hits") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.FaissHits)) +
+					"   " + keyStyle.Render("BM25 hits") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.BM25Hits)) + "\n")
+				sb.WriteString(keyStyle.Render("  candidates") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.TotalCandidates)) +
+					"   " + keyStyle.Render("reranked") + dimStyle.Render(" → ") + valStyle.Render(fmt.Sprintf("top %d", ds.Reranked)) + "\n")
 			}
-			m.addMessage(ChatMessage{Role: "system", Content: sb.String()})
+			m.addMessage(ChatMessage{Role: "system", Content: "debug · agent retrieval stats\n" + sb.String()})
 		}
 
 		if msg.NumResults == 0 || msg.TopScore < 0.5 {
@@ -707,6 +748,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenChatList
 		} else {
 			m.chatViewTitle = msg.Title
+			m.chatViewContent = msg.Content
+			m.chatViewSearchMode = false
+			m.chatViewSearchTerm = ""
+			m.chatViewMatchLines = nil
+			m.chatViewMatchIdx = 0
 			m.chatViewVP.Width = m.chatViewVpWidth()
 			m.chatViewVP.Height = m.chatViewVpHeight()
 			m.chatViewVP.SetContent(msg.Content)
@@ -2069,26 +2115,54 @@ func (m *AppModel) resetAgentState() {
 func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 	// RAG-only mode: if no API key is configured, skip LLM and show chunks directly.
 	if m.settings.NIMAPIKey == "" || m.tuiState.RAGOnly {
+		notice := "no API key set — showing retrieved chunks"
+		if m.tuiState.RAGOnly {
+			notice = "RAG-only mode — showing retrieved chunks"
+		}
+		m.addMessage(ChatMessage{Role: "system", Content: notice})
+
+		// Format results as a readable table.
+		keyStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+		valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+		dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+		starStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+		rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("(no LLM \u2014 API key not set \u00b7 showing top %d retrieved chunks)", len(m.streamSources)))
+		sb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s", "#", "score", "★", "src", "timestamp")) + "\n")
+		sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
 		for _, r := range m.streamSources {
 			score := r.RerankScore
 			if score == 0 {
 				score = r.Score
 			}
-			star := " "
+			star := dimStyle.Render("·")
 			if r.KeywordBoosted {
-				star = "\u2605"
+				star = starStyle.Render("★")
 			}
 			ts := r.Chunk.TimestampStart
 			if len(ts) > 19 {
 				ts = ts[:19]
 			}
-			text := r.Chunk.Text
-			if len(text) > 120 {
-				text = text[:120] + "\u2026"
+			src := r.Source
+			if len(src) > 7 {
+				src = src[:7]
 			}
-			sb.WriteString(fmt.Sprintf("\n[%d] %s %.3f \u00b7 %s \u00b7 %s\n    %s", r.Rank, star, score, r.Source, ts, text))
+			text := r.Chunk.Text
+			maxText := m.width - 50
+			if maxText < 30 {
+				maxText = 30
+			}
+			if len(text) > maxText {
+				text = text[:maxText] + "…"
+			}
+			sb.WriteString(
+				rankStyle.Render(fmt.Sprintf("  %2d", r.Rank)) +
+					keyStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
+					star +
+					valStyle.Render(fmt.Sprintf("  %-8s %-19s", src, ts)) + "\n" +
+					"      " + valStyle.Render(text) + "\n",
+			)
 		}
 		m.appState = StateIdle
 		m.addMessage(ChatMessage{
@@ -3217,17 +3291,23 @@ func loadChatFileCmd(ragDir, filename string) tea.Cmd {
 // parseChatJSON normalizes any chat JSON format into ViewerMessages.
 func parseChatJSON(data []byte) ([]workers.ViewerMessage, error) {
 	extractMsg := func(m map[string]interface{}) (workers.ViewerMessage, bool) {
-		sender, _ := m["sender"].(string)
-		for _, k := range []string{"from", "author", "name", "from_name", "username"} {
-			if sender == "" {
-				sender, _ = m[k].(string)
+		var sender string
+		// Try each field as string or as nested object containing a name.
+		for _, k := range []string{"sender", "author", "from", "user", "member", "poster"} {
+			if sender != "" {
+				break
 			}
-		}
-		if s, ok := m["sender"].(map[string]interface{}); ok {
-			for _, k := range []string{"nickname", "username", "name"} {
-				if v, _ := s[k].(string); v != "" {
-					sender = v
-					break
+			if v, ok := m[k].(string); ok && v != "" {
+				sender = v
+				break
+			}
+			if obj, ok := m[k].(map[string]interface{}); ok {
+				for _, nk := range []string{"nickname", "display_name", "name", "username",
+					"real_name", "realName", "from_name", "user_name", "title"} {
+					if v, ok := obj[nk].(string); ok && v != "" {
+						sender = v
+						break
+					}
 				}
 			}
 		}
@@ -3237,17 +3317,40 @@ func parseChatJSON(data []byte) ([]workers.ViewerMessage, error) {
 				text, _ = m[k].(string)
 			}
 		}
+		// Also handle text as []interface{} (Telegram-style rich text array).
+		if text == "" {
+			if arr, ok := m["text"].([]interface{}); ok {
+				var parts []string
+				for _, part := range arr {
+					switch v := part.(type) {
+					case string:
+						parts = append(parts, v)
+					case map[string]interface{}:
+						if t, ok := v["text"].(string); ok {
+							parts = append(parts, t)
+						}
+					}
+				}
+				text = strings.Join(parts, "")
+			}
+		}
 		ts, _ := m["timestamp"].(string)
 		for _, k := range []string{"date", "time", "created_at", "ts", "date_unixtime"} {
 			if ts == "" {
 				ts, _ = m[k].(string)
 			}
 		}
+		// Convert Slack-style unix epoch string (e.g. "1617000000.000000") to ISO.
+		if ts != "" {
+			if f, err := strconv.ParseFloat(ts, 64); err == nil && f > 1_000_000_000 {
+				ts = time.Unix(int64(f), 0).UTC().Format("2006-01-02T15:04:05")
+			}
+		}
 		if text == "" {
 			return workers.ViewerMessage{}, false
 		}
 		if sender == "" {
-			sender = "?"
+			sender = "(unknown)"
 		}
 		return workers.ViewerMessage{Sender: sender, Text: text, Timestamp: ts}, true
 	}
@@ -3399,6 +3502,36 @@ func (m AppModel) viewChatListContent() string {
 
 func (m *AppModel) handleChatViewerKey(msg tea.KeyMsg) []tea.Cmd {
 	m.acConsumedKey = true
+
+	// Search mode: route keystrokes to search input.
+	if m.chatViewSearchMode {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.chatViewSearchMode = false
+			m.chatViewSearchTerm = ""
+			m.chatViewMatchLines = nil
+			m.chatViewVP.Height = m.chatViewVpHeight()
+		case tea.KeyEnter:
+			if m.chatViewSearchTerm != "" {
+				m.viewerNextMatch()
+			} else {
+				m.chatViewSearchMode = false
+				m.chatViewVP.Height = m.chatViewVpHeight()
+			}
+		case tea.KeyBackspace, tea.KeyDelete:
+			if len(m.chatViewSearchTerm) > 0 {
+				m.chatViewSearchTerm = m.chatViewSearchTerm[:len(m.chatViewSearchTerm)-1]
+				m.viewerDoSearch()
+			}
+		default:
+			if r := msg.Runes; len(r) > 0 {
+				m.chatViewSearchTerm += string(r)
+				m.viewerDoSearch()
+			}
+		}
+		return nil
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.screen = ScreenChatList
@@ -3414,8 +3547,66 @@ func (m *AppModel) handleChatViewerKey(msg tea.KeyMsg) []tea.Cmd {
 		m.chatViewVP.GotoTop()
 	case tea.KeyEnd:
 		m.chatViewVP.GotoBottom()
+	default:
+		switch msg.String() {
+		case "/", "f":
+			m.chatViewSearchMode = true
+			m.chatViewSearchTerm = ""
+			m.chatViewMatchLines = nil
+			m.chatViewVP.Height = m.chatViewVpHeight()
+		case "n":
+			m.viewerNextMatch()
+		case "N":
+			m.viewerPrevMatch()
+		}
 	}
 	return nil
+}
+
+var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func (m *AppModel) viewerDoSearch() {
+	term := strings.ToLower(m.chatViewSearchTerm)
+	if term == "" {
+		m.chatViewMatchLines = nil
+		return
+	}
+	stripped := ansiStripRe.ReplaceAllString(m.chatViewContent, "")
+	lines := strings.Split(stripped, "\n")
+	var matches []int
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(line), term) {
+			matches = append(matches, i)
+		}
+	}
+	m.chatViewMatchLines = matches
+	m.chatViewMatchIdx = 0
+	if len(matches) > 0 {
+		m.viewerScrollToMatch(matches[0])
+	}
+}
+
+func (m *AppModel) viewerScrollToMatch(lineIdx int) {
+	m.chatViewVP.GotoTop()
+	if lineIdx > 0 {
+		m.chatViewVP.LineDown(lineIdx)
+	}
+}
+
+func (m *AppModel) viewerNextMatch() {
+	if len(m.chatViewMatchLines) == 0 {
+		return
+	}
+	m.chatViewMatchIdx = (m.chatViewMatchIdx + 1) % len(m.chatViewMatchLines)
+	m.viewerScrollToMatch(m.chatViewMatchLines[m.chatViewMatchIdx])
+}
+
+func (m *AppModel) viewerPrevMatch() {
+	if len(m.chatViewMatchLines) == 0 {
+		return
+	}
+	m.chatViewMatchIdx = (m.chatViewMatchIdx - 1 + len(m.chatViewMatchLines)) % len(m.chatViewMatchLines)
+	m.viewerScrollToMatch(m.chatViewMatchLines[m.chatViewMatchIdx])
 }
 
 func (m AppModel) viewChatViewerContent() string {
@@ -3423,11 +3614,32 @@ func (m AppModel) viewChatViewerContent() string {
 	if m.chatViewVP.TotalLineCount() > 0 {
 		pct = int(m.chatViewVP.ScrollPercent() * 100)
 	}
+
 	title := ui.TitleStyle.Render(m.chatViewTitle)
 	scroll := ui.HelpStyle.Render(fmt.Sprintf("%d%%", pct))
-	header := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", scroll)
-	inner := header + "\n\n" + m.chatViewVP.View() + "\n\n" +
-		ui.HelpStyle.Render("↑↓ / PgUp/PgDn: scroll · Home/End: top/bottom · ESC: back")
+
+	// Match count badge when search has results.
+	matchInfo := ""
+	if m.chatViewSearchTerm != "" && len(m.chatViewMatchLines) > 0 {
+		matchInfo = " " + ui.ActiveFlagStyle.Render(fmt.Sprintf("%d/%d", m.chatViewMatchIdx+1, len(m.chatViewMatchLines)))
+	} else if m.chatViewSearchTerm != "" && len(m.chatViewMatchLines) == 0 {
+		matchInfo = " " + ui.ErrorMsgStyle.Render("no match")
+	}
+
+	header := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", scroll, matchInfo)
+
+	// Search bar line shown when search mode is active.
+	var searchLine string
+	if m.chatViewSearchMode {
+		prompt := ui.SystemMsgStyle.Render("/")
+		cursor := "█"
+		searchLine = "\n" + prompt + m.chatViewSearchTerm + cursor +
+			ui.HelpStyle.Render("  Enter: next · n/N: next/prev · ESC: close")
+	}
+
+	helpText := ui.HelpStyle.Render("↑↓ / PgUp/PgDn: scroll · Home/End · /: find · ESC: back")
+	inner := header + "\n\n" + m.chatViewVP.View() + "\n" + helpText + searchLine
+
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.ColorCyan).
@@ -3437,7 +3649,12 @@ func (m AppModel) viewChatViewerContent() string {
 }
 
 func (m AppModel) chatViewVpHeight() int {
-	h := m.height - 4 - 2 - 5 // total - input/status - border - header+footer
+	// Layout: border(2) + header(1) + blank(1) + VP + blank(1) + help(1) + inputRow(3) + statusBar(1) = 10
+	extra := 0
+	if m.chatViewSearchMode {
+		extra = 1 // search bar takes one extra line
+	}
+	h := m.height - 10 - extra
 	if h < 3 {
 		return 3
 	}
