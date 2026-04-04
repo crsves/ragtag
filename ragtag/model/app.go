@@ -33,6 +33,9 @@ type BridgeReadyMsg struct{}
 // BridgeErrMsg is sent when the bridge fails to start.
 type BridgeErrMsg struct{ Err error }
 
+// BridgeRestartedMsg is sent when the bridge has been restarted after a crash.
+type BridgeRestartedMsg struct{ Bridge *workers.Bridge }
+
 // RetrievalDoneMsg carries retrieval results back to the event loop.
 type RetrievalDoneMsg struct {
 	Results    []workers.Result
@@ -254,10 +257,10 @@ var pipelineMenuItems = []struct {
 	label  string
 	action string
 }{
-	{"Ingest new data (incremental)", "ingest"},
-	{"Check — what to export next", "check"},
-	{"Rebuild full index from raw data", "rebuild"},
-	{"Test retrieval (no LLM call)", "test"},
+	{"Ingest new export", "ingest"},
+	{"What to export next", "check"},
+	{"Rebuild index from scratch", "rebuild"},
+	{"Test retrieval (no LLM)", "test"},
 	{"Show index stats", "stats"},
 }
 
@@ -590,6 +593,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.maybeWarnMissingAPIKey()
 		cmds = append(cmds, fetchChatListCmd(m.bridge))
 
+	case BridgeRestartedMsg:
+		if m.bridge != nil {
+			m.bridge.Kill()
+		}
+		m.bridge = msg.Bridge
+		m.bridgeReady = true
+		m.appState = StateIdle
+		m.addMessage(ChatMessage{Role: "system", Content: "✓ Bridge restarted — try again."})
+		cmds = append(cmds, fetchChatListCmd(m.bridge))
+
 	case BridgeErrMsg:
 		m.appState = StateError
 		m.errMsg = msg.Err.Error()
@@ -849,9 +862,20 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PipelineResultMsg:
 		m.screen = ScreenChat
 		if msg.Err != nil {
-			m.addMessage(ChatMessage{Role: "error", Content: fmt.Sprintf("[pipeline/%s] %v", msg.Action, msg.Err)})
+			if isBridgePipeError(msg.Err) {
+				// Bridge process died — kill it and restart automatically.
+				if m.bridge != nil {
+					m.bridge.Kill()
+					m.bridge = nil
+					m.bridgeReady = false
+				}
+				m.addMessage(ChatMessage{Role: "error", Content: fmt.Sprintf("⚠ Bridge crashed during %s — restarting...", msg.Action)})
+				cmds = append(cmds, restartBridgeCmd(m.ragDir))
+			} else {
+				m.addMessage(ChatMessage{Role: "error", Content: fmt.Sprintf("[pipeline/%s] %v", msg.Action, msg.Err)})
+			}
 		} else {
-			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("[pipeline/%s]\n%s", msg.Action, msg.Message)})
+			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("✓ [%s] %s", msg.Action, msg.Message)})
 		}
 
 	// ── Chat file list ─────────────────────────────────────────────────────
@@ -1545,6 +1569,7 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
 				path := filepath.Join(m.ragDir, "raw", filename)
 				m.pipelineFilePicking = false
 				m.screen = ScreenChat
+				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("⏳ Ingesting %q — this may take a few minutes...", filename)})
 				return []tea.Cmd{pipelineIngestCmd(m.bridge, path)}
 			}
 		}
@@ -1625,12 +1650,12 @@ func (m AppModel) viewPipelineContent() string {
 
 	if m.pipelineFilePicking {
 		// ── file picker ───────────────────────────────────────────────
-		sb.WriteString(accentStyle.Render("◆ Ingest — pick file from raw/") + "\n\n")
+		rawPath := filepath.Join(m.ragDir, "raw")
+		sb.WriteString(accentStyle.Render("◆ Ingest — pick a file to add") + "\n")
+		sb.WriteString(dimStyle.Render("  Drop your export JSON into: ") + valStyle.Render(rawPath) + "\n\n")
 		if len(m.chatFileList) == 0 {
 			sb.WriteString(dimStyle.Render("  No JSON files found in raw/") + "\n\n")
-			sb.WriteString(dimStyle.Render("  Drop your chat export JSON into the ") +
-				valStyle.Bold(true).Render("raw/") +
-				dimStyle.Render(" directory, then come back here."))
+			sb.WriteString(dimStyle.Render("  Export from Slack or Discord, drop the JSON into the folder above, then come back here."))
 		} else {
 			for i, f := range m.chatFileList {
 				isSelected := i == m.pipelineFileCursor
@@ -1652,10 +1677,11 @@ func (m AppModel) viewPipelineContent() string {
 
 	} else {
 		// ── menu ──────────────────────────────────────────────────────
+		sb.WriteString(dimStyle.Render("  Got new messages? Export from Slack/Discord → drop JSON into raw/ → Ingest.") + "\n\n")
 		descriptions := map[string]string{
-			"ingest":  "incrementally add a new chat export from raw/",
-			"check":   "show what date range to export from Discord/Slack",
-			"rebuild": "reprocess all raw data from scratch",
+			"ingest":  "add messages from a new export file — fast, no full rebuild needed",
+			"check":   "show the date range to use when exporting from Slack/Discord",
+			"rebuild": "reprocess all raw data from scratch — use if index is broken or corrupted (slow)",
 			"test":    "run a retrieval query without calling the LLM",
 			"stats":   "show chunk count and index info",
 		}
@@ -3669,6 +3695,30 @@ type PipelineResultMsg struct {
 	Action  string
 	Message string
 	Err     error
+}
+
+// isBridgePipeError returns true when err indicates the bridge subprocess has died.
+func isBridgePipeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "bridge stdout closed") ||
+		strings.Contains(s, "write to bridge") ||
+		strings.Contains(s, "read bridge response")
+}
+
+// restartBridgeCmd kills any existing bridge, starts a fresh one, and returns
+// BridgeRestartedMsg on success or BridgeErrMsg on failure.
+func restartBridgeCmd(ragDir string) tea.Cmd {
+	return func() tea.Msg {
+		b, err := workers.NewBridge(ragDir)
+		if err != nil {
+			return BridgeErrMsg{Err: fmt.Errorf("bridge restart failed: %w", err)}
+		}
+		return BridgeRestartedMsg{Bridge: b}
+	}
 }
 
 func pipelineRebuildCmd(bridge *workers.Bridge) tea.Cmd {
