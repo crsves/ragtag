@@ -326,6 +326,7 @@ type AppModel struct {
 	updateAvailable    string // non-empty when a newer version exists
 	updateChangelog    string
 	startupUpdateShown bool // true once the startup update clarify has been shown
+	startupAPIWarned   bool // true once we've warned that AI is on without an API key
 
 	// Autocomplete
 	acSuggestions []cmdSuggestion
@@ -586,6 +587,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BridgeReadyMsg:
 		m.bridgeReady = true
 		m.appState = StateIdle
+		m.maybeWarnMissingAPIKey()
 		cmds = append(cmds, fetchChatListCmd(m.bridge))
 
 	case BridgeErrMsg:
@@ -940,7 +942,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Kind:     ClarifyKindUpdate,
 					Question: question,
 					Options: []ClarifyOption{
-						{ID: "yes", Label: "Update now  (/update)"},
+						{ID: "yes", Label: "Update now (/update)"},
 						{ID: "no", Label: "Later"},
 					},
 					Cursor:           0,
@@ -1845,6 +1847,10 @@ func (m *AppModel) handleHelpKey(msg tea.KeyMsg) []tea.Cmd {
 		m.helpSection = ""
 		m.refreshHelpContent()
 		m.acConsumedKey = true
+	case tea.KeyBackspace, tea.KeyLeft:
+		m.helpSection = ""
+		m.refreshHelpContent()
+		m.acConsumedKey = true
 	case tea.KeyUp:
 		m.helpVp.LineUp(1)
 		m.acConsumedKey = true
@@ -2105,6 +2111,7 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.tuiState.RAGOnly = !m.tuiState.RAGOnly
 		m.saveState()
 		m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("rag-only: %v", m.tuiState.RAGOnly)})
+		m.maybeWarnMissingAPIKey()
 
 	case "/mode":
 		modes := []string{"plain", "structured", "rich"}
@@ -2641,8 +2648,8 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 
 		// ── card layout ─────────────────────────────────────────────────────
 		cardWidth := m.width - 4
-		if cardWidth < 52 {
-			cardWidth = 52
+		if cardWidth < 24 {
+			cardWidth = 24
 		}
 		// inner content width = cardWidth - 2 (borders) - 2 (padding each side)
 		innerWidth := cardWidth - 6
@@ -2656,10 +2663,7 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 
 			// score bar
 			const barLen = 10
-			filled := int(score * float64(barLen))
-			if filled > barLen {
-				filled = barLen
-			}
+			filled := clampScoreBarFill(score, barLen)
 			bar := scoreStyle.Render(strings.Repeat("█", filled)) +
 				dimStyle.Render(strings.Repeat("░", barLen-filled))
 
@@ -2668,10 +2672,7 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 				star = starStyle.Render("★")
 			}
 
-			ts := r.Chunk.TimestampStart
-			if len(ts) > 19 {
-				ts = ts[:19]
-			}
+			ts := browserDisplayTimestamp(r.Chunk.TimestampStart)
 
 			// metadata line: #1  ██████░░░░  0.8234  ★  source  timestamp
 			meta := rankStyle.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
@@ -2682,7 +2683,7 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 				dimStyle.Render(ts)
 
 			// text: collapse newlines, wrap to innerWidth, max 4 lines
-			text := strings.Join(strings.Fields(r.Chunk.Text), " ")
+			text := sanitizeBrowserChunkText(r.Chunk.Text, r.Chunk.Sender)
 			maxLen := innerWidth * 4
 			if maxLen < 80 {
 				maxLen = 80
@@ -3065,6 +3066,9 @@ func (m AppModel) renderStatusBar() string {
 	case StateError:
 		parts = append(parts, ui.ErrorMsgStyle.Render("[error]"))
 	}
+	if m.needsAPIKeyWarning() {
+		parts = append(parts, ui.ErrorMsgStyle.Render("[set NIM API key or /rag]"))
+	}
 
 	bar := strings.Join(parts, "  ")
 
@@ -3086,6 +3090,20 @@ func (m AppModel) renderStatusBar() string {
 	}
 
 	return ui.StatusBarStyle.Width(m.width).Render(bar)
+}
+
+func (m AppModel) needsAPIKeyWarning() bool {
+	return strings.TrimSpace(m.settings.NIMAPIKey) == "" && !m.tuiState.RAGOnly
+}
+
+func (m *AppModel) maybeWarnMissingAPIKey() {
+	if m.startupAPIWarned || !m.needsAPIKeyWarning() {
+		return
+	}
+	msg := lipgloss.NewStyle().Foreground(ui.ColorRed).Bold(true).Render("NIM API key not set.") +
+		lipgloss.NewStyle().Foreground(ui.ColorDim).Render(" AI answers stay off until you add one in Settings > API or toggle /rag.")
+	m.addMessage(ChatMessage{Role: "system", Content: msg, Prerendered: true})
+	m.startupAPIWarned = true
 }
 
 func (m AppModel) renderInputRow() string {
@@ -3118,7 +3136,7 @@ func (m AppModel) renderInputRow() string {
 	if m.screen == ScreenHelp {
 		hint := "  ↑↓ choose category · Enter open · Esc close"
 		if m.helpSection != "" {
-			hint = "  ↑↓ PgUp/PgDn scroll · Esc back"
+			hint = "  ↑↓ PgUp/PgDn scroll · Esc/back return"
 		}
 		parts = append(parts, ui.HelpStyle.Render(hint))
 	}
@@ -3319,7 +3337,7 @@ func (m AppModel) buildHelpSectionContent(sectionID string) string {
 		sb.WriteString(sectionStyle.Render("Good first commands") + "\n")
 		sb.WriteString("  " + cmdStyle.Render("/help") + "          open this help browser\n")
 		sb.WriteString("  " + cmdStyle.Render("/model") + "         pick a model interactively\n")
-		sb.WriteString("  " + cmdStyle.Render("/window 10") + "     show more surrounding context\n")
+		sb.WriteString("  " + cmdStyle.Render("/window 20") + "     show more surrounding context than the default\n")
 		sb.WriteString("  " + cmdStyle.Render("/clear") + "         clear the visible conversation\n")
 	case "commands":
 		sb.WriteString(titleStyle.Render("Help · Commands") + "\n\n")
@@ -4308,6 +4326,7 @@ func (m *AppModel) handleChatViewerKey(msg tea.KeyMsg) []tea.Cmd {
 }
 
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var browserLeadingTimestampRe = regexp.MustCompile(`^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]?\s*`)
 
 func (m *AppModel) viewerDoSearch() {
 	term := strings.ToLower(m.chatViewSearchTerm)
@@ -4427,66 +4446,26 @@ func (m *AppModel) openRagBrowser() {
 }
 
 func (m *AppModel) resizeRagBrowserViewports() {
-	listH := m.height - 8
-	if listH < 5 {
-		listH = 5
-	}
-	ctxH := m.height - 10
-	if ctxH < 5 {
-		ctxH = 5
-	}
-	m.ragBrowseVP.Width = m.width - 6
-	m.ragBrowseVP.Height = listH
+	m.ragBrowseVP.Width = m.ragBrowserInnerWidth()
+	m.ragBrowseVP.Height = m.ragBrowserViewportHeight()
 	m.ragBrowseVP.SetContent(m.renderRagBrowserList())
 	m.ensureRagBrowseCursorVisible()
 
-	m.ragBrowseCtxVP.Width = m.width - 8
-	m.ragBrowseCtxVP.Height = ctxH
+	m.ragBrowseCtxVP.Width = m.ragBrowserInnerWidth()
+	m.ragBrowseCtxVP.Height = m.ragBrowserViewportHeight()
 	if m.ragBrowseCtxOpen {
 		m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
 	}
 }
 
 func (m AppModel) ragBrowseCardHeight(r workers.Result) int {
-	cardWidth := m.width - 6
-	if cardWidth < 52 {
-		cardWidth = 52
-	}
-	innerWidth := cardWidth - 6
-	text := strings.Join(strings.Fields(r.Chunk.Text), " ")
-	maxLen := innerWidth * 4
-	if maxLen < 80 {
-		maxLen = 80
-	}
-	if len(text) > maxLen {
-		text = text[:maxLen] + "…"
-	}
-	runes := []rune(text)
-	lines := 0
-	for len(runes) > innerWidth {
-		cut := innerWidth
-		for cut > 0 && runes[cut] != ' ' {
-			cut--
-		}
-		if cut == 0 {
-			cut = innerWidth
-		}
-		lines++
-		runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
-	}
-	if len(runes) > 0 {
-		lines++
-	}
-	if lines == 0 {
-		lines = 1
-	}
-	return lines + 4 // meta + separator + borders
+	return lipgloss.Height(m.renderRagBrowserCard(r, -1))
 }
 
 func (m AppModel) ragBrowseCardOffset(idx int) int {
 	offset := 0
 	for i := 0; i < idx && i < len(m.ragBrowseChunks); i++ {
-		offset += m.ragBrowseCardHeight(m.ragBrowseChunks[i]) + 1
+		offset += lipgloss.Height(m.renderRagBrowserCard(m.ragBrowseChunks[i], i)) + 1
 	}
 	return offset
 }
@@ -4496,7 +4475,7 @@ func (m *AppModel) ensureRagBrowseCursorVisible() {
 		return
 	}
 	top := m.ragBrowseCardOffset(m.ragBrowseCursor)
-	bottom := top + m.ragBrowseCardHeight(m.ragBrowseChunks[m.ragBrowseCursor])
+	bottom := top + lipgloss.Height(m.renderRagBrowserCard(m.ragBrowseChunks[m.ragBrowseCursor], m.ragBrowseCursor))
 	if top < m.ragBrowseVP.YOffset {
 		m.ragBrowseVP.YOffset = top
 	} else if bottom > m.ragBrowseVP.YOffset+m.ragBrowseVP.Height {
@@ -4508,6 +4487,17 @@ func (m *AppModel) ensureRagBrowseCursorVisible() {
 }
 
 func (m *AppModel) renderRagBrowserList() string {
+	var parts []string
+	for i, r := range m.ragBrowseChunks {
+		if i > 0 {
+			parts = append(parts, "")
+		}
+		parts = append(parts, m.renderRagBrowserCard(r, i))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (m *AppModel) renderRagBrowserCard(r workers.Result, idx int) string {
 	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 	rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
@@ -4516,88 +4506,57 @@ func (m *AppModel) renderRagBrowserList() string {
 	srcStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
 	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-	cardWidth := m.width - 6
-	if cardWidth < 52 {
-		cardWidth = 52
+	cardWidth := m.ragBrowserInnerWidth()
+	innerWidth := max(16, cardWidth-6)
+
+	score := r.RerankScore
+	if score == 0 {
+		score = r.Score
 	}
-	innerWidth := cardWidth - 6
+	const barLen = 10
+	filled := clampScoreBarFill(score, barLen)
+	bar := scoreStyle.Render(strings.Repeat("█", filled)) +
+		dimStyle.Render(strings.Repeat("░", barLen-filled))
 
-	var parts []string
-	for i, r := range m.ragBrowseChunks {
-		score := r.RerankScore
-		if score == 0 {
-			score = r.Score
-		}
-		const barLen = 10
-		filled := int(score * float64(barLen))
-		if filled > barLen {
-			filled = barLen
-		}
-		bar := scoreStyle.Render(strings.Repeat("█", filled)) +
-			dimStyle.Render(strings.Repeat("░", barLen-filled))
-
-		star := dimStyle.Render("·")
-		if r.KeywordBoosted {
-			star = starStyle.Render("★")
-		}
-		ts := r.Chunk.TimestampStart
-		if len(ts) > 19 {
-			ts = ts[:19]
-		}
-		meta := rankStyle.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
-			bar + "  " +
-			scoreStyle.Render(fmt.Sprintf("%.4f", score)) + "  " +
-			star + "  " +
-			srcStyle.Render(r.Source) + "  " +
-			dimStyle.Render(ts)
-
-		text := strings.Join(strings.Fields(r.Chunk.Text), " ")
-		maxLen := innerWidth * 4
-		if maxLen < 80 {
-			maxLen = 80
-		}
-		if len(text) > maxLen {
-			text = text[:maxLen] + "…"
-		}
-		runes := []rune(text)
-		var lines []string
-		for len(runes) > innerWidth {
-			cut := innerWidth
-			for cut > 0 && runes[cut] != ' ' {
-				cut--
-			}
-			if cut == 0 {
-				cut = innerWidth
-			}
-			lines = append(lines, string(runes[:cut]))
-			runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
-		}
-		if len(runes) > 0 {
-			lines = append(lines, string(runes))
-		}
-
-		sep := dimStyle.Render(strings.Repeat("─", innerWidth))
-		body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
-
-		borderColor := ui.ColorDim
-		if i == m.ragBrowseCursor {
-			borderColor = ui.ColorCyan
-			body = accentStyle.Render("▶ ") + body
-		}
-
-		card := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(borderColor).
-			Padding(0, 1).
-			Width(cardWidth).
-			Render(body)
-
-		if i > 0 {
-			parts = append(parts, "")
-		}
-		parts = append(parts, card)
+	star := dimStyle.Render("·")
+	if r.KeywordBoosted {
+		star = starStyle.Render("★")
 	}
-	return strings.Join(parts, "\n")
+	meta := rankStyle.Render(fmt.Sprintf("#%-2d", idx+1)) + "  " +
+		bar + "  " +
+		scoreStyle.Render(fmt.Sprintf("%.4f", score)) + "  " +
+		star + "  " +
+		srcStyle.Render(r.Source) + "  " +
+		dimStyle.Render(browserDisplayTimestamp(r.Chunk.TimestampStart))
+
+	text := sanitizeBrowserChunkText(r.Chunk.Text, r.Chunk.Sender)
+	maxLen := innerWidth * 4
+	if maxLen < 80 {
+		maxLen = 80
+	}
+	if len(text) > maxLen {
+		text = text[:maxLen] + "…"
+	}
+	lines := wrapText(text, innerWidth)
+	if len(lines) == 0 {
+		lines = []string{"(empty chunk)"}
+	}
+
+	sep := dimStyle.Render(strings.Repeat("─", innerWidth))
+	body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
+
+	borderColor := ui.ColorDim
+	if idx == m.ragBrowseCursor {
+		borderColor = ui.ColorCyan
+		body = accentStyle.Render("▶ ") + body
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1).
+		Width(cardWidth).
+		Render(body)
 }
 
 func (m *AppModel) renderRagBrowserCtx() string {
@@ -4612,55 +4571,142 @@ func (m *AppModel) renderRagBrowserCtx() string {
 	tsStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow)
 	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-	cardWidth := m.width - 6
-	innerWidth := cardWidth - 6
+	cardWidth := m.ragBrowserInnerWidth()
+	innerWidth := max(20, cardWidth-6)
 
 	var lines []string
 	title := titleStyle.Render(fmt.Sprintf("Context window — chunk #%d", m.ragBrowseCursor+1))
 	lines = append(lines, title)
 	lines = append(lines, dimStyle.Render(strings.Repeat("─", innerWidth)))
-	lines = append(lines, titleStyle.Render("Main match"))
 
-	mainPrefix := userStyle.Render(r.Chunk.Sender) + "  " + tsStyle.Render(trimBrowserTimestamp(r.Chunk.TimestampStart)) + "  "
-	for i, line := range wrapText(r.Chunk.Text, max(20, innerWidth-len([]rune(r.Chunk.Sender))-22)) {
-		if i == 0 {
-			lines = append(lines, mainPrefix+textStyle.Render(line))
-		} else {
-			lines = append(lines, strings.Repeat(" ", max(0, lipgloss.Width(mainPrefix)))+textStyle.Render(line))
-		}
+	context := r.ContextWindow
+	if len(context) == 0 {
+		context = []workers.Chunk{r.Chunk}
 	}
-
-	var contextRows []string
-	for _, c := range r.ContextWindow {
-		if c.ChunkID == r.Chunk.ChunkID {
-			continue
-		}
-		prefix := userStyle.Render(c.Sender) + "  " + tsStyle.Render(trimBrowserTimestamp(c.TimestampStart)) + "  "
-		wrapped := wrapText(c.Text, max(20, innerWidth-lipgloss.Width(prefix)))
-		for i, line := range wrapped {
-			if i == 0 {
-				contextRows = append(contextRows, prefix+textStyle.Render(line))
-			} else {
-				contextRows = append(contextRows, strings.Repeat(" ", max(0, lipgloss.Width(prefix)))+textStyle.Render(line))
+	anchorIdx := len(context) / 2
+	if len(context) > 0 {
+		for i, chunk := range context {
+			if chunk.ChunkID == r.Chunk.ChunkID {
+				anchorIdx = i
+				break
 			}
 		}
 	}
 
-	lines = append(lines, "")
-	lines = append(lines, titleStyle.Render("Surrounding context"))
-	if len(contextRows) == 0 {
+	senderWidth := browserSenderWidth(append([]workers.Chunk{r.Chunk}, context...))
+	textWidth := max(20, innerWidth-16-2-senderWidth-2)
+	before := browserTimelineRows(context[:anchorIdx], senderWidth, textWidth, userStyle, tsStyle, textStyle)
+	after := browserTimelineRows(context[min(anchorIdx+1, len(context)):], senderWidth, textWidth, userStyle, tsStyle, textStyle)
+
+	if len(before) > 0 {
+		lines = append(lines, dimStyle.Render("Earlier context"))
+		lines = append(lines, before...)
+		lines = append(lines, "")
+	}
+
+	lines = append(lines, renderBrowserMainMatchCard(r.Chunk, cardWidth))
+
+	if len(after) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, dimStyle.Render("Later context"))
+		lines = append(lines, after...)
+	} else if len(before) == 0 {
+		lines = append(lines, "")
 		lines = append(lines, dimStyle.Render("(no surrounding context available)"))
-	} else {
-		lines = append(lines, contextRows...)
 	}
 	return strings.Join(lines, "\n")
 }
 
-func trimBrowserTimestamp(ts string) string {
-	if len(ts) > 19 {
-		return ts[:19]
+func clampScoreBarFill(score float64, barLen int) int {
+	filled := int(score * float64(barLen))
+	if filled < 0 {
+		return 0
+	}
+	if filled > barLen {
+		return barLen
+	}
+	return filled
+}
+
+func sanitizeBrowserChunkText(text, sender string) string {
+	clean := strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+	clean = browserLeadingTimestampRe.ReplaceAllString(clean, "")
+	if sender != "" {
+		senderPrefixRe := regexp.MustCompile(`^` + regexp.QuoteMeta(sender) + `\s*:\s*`)
+		clean = senderPrefixRe.ReplaceAllString(clean, "")
+	}
+	return strings.TrimSpace(clean)
+}
+
+func browserDisplayTimestamp(ts string) string {
+	ts = strings.TrimSpace(strings.ReplaceAll(ts, "T", " "))
+	if len(ts) > 16 {
+		ts = ts[:16]
 	}
 	return ts
+}
+
+func browserSenderWidth(chunks []workers.Chunk) int {
+	width := 8
+	for _, chunk := range chunks {
+		if w := lipgloss.Width(chunk.Sender); w > width {
+			width = w
+		}
+	}
+	if width > 14 {
+		width = 14
+	}
+	return width
+}
+
+func browserTimelineRows(chunks []workers.Chunk, senderWidth, textWidth int, senderStyle, tsStyle, textStyle lipgloss.Style) []string {
+	var rows []string
+	for _, chunk := range chunks {
+		sender := chunk.Sender
+		if sender == "" {
+			sender = "(unknown)"
+		}
+		ts := browserDisplayTimestamp(chunk.TimestampStart)
+		body := sanitizeBrowserChunkText(chunk.Text, chunk.Sender)
+		wrapped := wrapText(body, textWidth)
+		if len(wrapped) == 0 {
+			wrapped = []string{"(empty chunk)"}
+		}
+		prefixPlain := fmt.Sprintf("%-16s  %-*s  ", ts, senderWidth, sender)
+		prefix := tsStyle.Render(fmt.Sprintf("%-16s", ts)) + "  " +
+			senderStyle.Render(fmt.Sprintf("%-*s", senderWidth, sender)) + "  "
+		rows = append(rows, prefix+textStyle.Render(wrapped[0]))
+		indent := strings.Repeat(" ", lipgloss.Width(prefixPlain))
+		for _, line := range wrapped[1:] {
+			rows = append(rows, indent+textStyle.Render(line))
+		}
+	}
+	return rows
+}
+
+func renderBrowserMainMatchCard(chunk workers.Chunk, width int) string {
+	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	userStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
+	bodyWidth := max(20, width-6)
+	lines := wrapText(sanitizeBrowserChunkText(chunk.Text, chunk.Sender), bodyWidth)
+	if len(lines) == 0 {
+		lines = []string{"(empty chunk)"}
+	}
+
+	content := titleStyle.Render("Main match") + "\n" +
+		dimStyle.Render(browserDisplayTimestamp(chunk.TimestampStart)) + "  " +
+		userStyle.Render(chunk.Sender) + "\n\n" +
+		textStyle.Render(strings.Join(lines, "\n"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ui.ColorYellow).
+		Padding(0, 1).
+		Width(width).
+		Render(content)
 }
 
 func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
@@ -4706,7 +4752,7 @@ func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
 		}
 	case tea.KeyEnter:
 		if !m.ragBrowseCtxOpen && m.ragBrowseCursor < len(m.ragBrowseChunks) {
-			m.ragBrowseCtxVP = viewport.New(m.width-8, max(5, m.height-10))
+			m.ragBrowseCtxVP = viewport.New(m.ragBrowserInnerWidth(), m.ragBrowserViewportHeight())
 			m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
 			m.ragBrowseCtxVP.GotoTop()
 			m.ragBrowseCtxOpen = true
@@ -4736,7 +4782,31 @@ func (m AppModel) viewRagBrowserContent() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.ColorCyan).
 		Padding(0, 1).
-		Width(m.width - 2).
-		Height(max(6, m.height-4)).
+		Width(m.ragBrowserBoxWidth()).
+		Height(m.viewportHeight()).
 		Render(inner)
+}
+
+func (m AppModel) ragBrowserBoxWidth() int {
+	w := m.width - 4
+	if w < 24 {
+		return 24
+	}
+	return w
+}
+
+func (m AppModel) ragBrowserInnerWidth() int {
+	w := m.ragBrowserBoxWidth() - 4
+	if w < 20 {
+		return 20
+	}
+	return w
+}
+
+func (m AppModel) ragBrowserViewportHeight() int {
+	h := m.viewportHeight() - 4
+	if h < 3 {
+		return 3
+	}
+	return h
 }
