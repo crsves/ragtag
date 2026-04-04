@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	debug2 "runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -370,6 +371,25 @@ type AppModel struct {
 
 	// Startup animation
 	animFrame int
+}
+
+// crashLog appends a timestamped message to crash.log in the ragDir (or ~/ragtag, ~/raa).
+func crashLog(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	home, _ := os.UserHomeDir()
+	for _, dir := range []string{
+		filepath.Join(home, "raa"),
+		filepath.Join(home, "ragtag"),
+	} {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			f, err := os.OpenFile(filepath.Join(dir, "crash.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err == nil {
+				fmt.Fprintf(f, "[%s] %s\n", time.Now().Format(time.RFC3339), msg)
+				f.Close()
+			}
+			return
+		}
+	}
 }
 
 // ─── New ─────────────────────────────────────────────────────────────────────
@@ -2301,6 +2321,7 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
+				crashLog("panic in runAgentStepCmd: %v\n%s", r, debug2.Stack())
 				msg = AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[agent panic: %v]", r)}
 			}
 		}()
@@ -3250,7 +3271,16 @@ func (m AppModel) viewModelPickerContent() string {
 // ─── tea.Cmd factories ────────────────────────────────────────────────────────
 
 func retrieveCmd(bridge *workers.Bridge, query string, k, window int, debug bool, minResults int, scoreThreshold float64) tea.Cmd {
-	return func() tea.Msg {
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				crashLog("panic in retrieveCmd: %v\n%s", r, debug2.Stack())
+				msg = RetrievalDoneMsg{Err: fmt.Errorf("panic in retrieval: %v", r)}
+			}
+		}()
+		if bridge == nil {
+			return RetrievalDoneMsg{Err: fmt.Errorf("bridge not initialised")}
+		}
 		results, ctx, stats, err := bridge.Retrieve(query, k, window, debug, minResults, scoreThreshold)
 		return RetrievalDoneMsg{Results: results, Context: ctx, DebugStats: stats, Err: err}
 	}
@@ -3279,6 +3309,7 @@ func agentRetrievalCmd(bridge *workers.Bridge, query string, k, window int, debu
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
+				crashLog("panic in agentRetrievalCmd: %v\n%s", r, debug2.Stack())
 				msg = AgentRetrievalDoneMsg{Query: query, Err: fmt.Errorf("panic in retrieval: %v", r)}
 			}
 		}()
