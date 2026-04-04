@@ -338,7 +338,10 @@ def handle(req):
     elif cmd == "list_raw_files":
         raw_dir = RAG_DIR / "raw"
         if raw_dir.is_dir():
-            files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".json"))
+            files = sorted(
+                f for f in os.listdir(raw_dir)
+                if f.endswith(".json") or f.endswith(".csv")
+            )
         else:
             files = []
         return {"files": files}

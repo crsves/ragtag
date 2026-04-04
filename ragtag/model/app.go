@@ -1017,6 +1017,27 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	// ── On-demand /update check result ─────────────────────────────────────
+	case FreshUpdateCheckMsg:
+		if msg.Err != nil {
+			m.addMessage(ChatMessage{Role: "error", Content: "Update failed: " + msg.Err.Error()})
+		} else if msg.Latest == "" {
+			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("You're already on the latest version (%s).", AppVersion)})
+		} else {
+			m.updateAvailable = msg.Latest
+			m.clarify = ClarifyState{
+				Active:   true,
+				Kind:     ClarifyKindRestart,
+				Question: fmt.Sprintf("ragtag updated to %s! Restart now?", msg.Latest),
+				Options: []ClarifyOption{
+					{ID: "yes", Label: "Restart now"},
+					{ID: "no", Label: "Later"},
+				},
+				Cursor:           0,
+				SuggestedDefault: "yes",
+			}
+		}
+
 	// ── Version check ──────────────────────────────────────────────────────
 	case VersionCheckMsg:
 		if msg.Err == nil && isNewerVersion(AppVersion, msg.Latest) {
@@ -2344,8 +2365,9 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 
 	case "/update":
 		if m.updateAvailable == "" {
-			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("You're on the latest version (%s).", AppVersion)})
-			return nil
+			// No cached update — do a fresh check, then update if newer.
+			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("Checking for updates (current: %s)…", AppVersion)})
+			return []tea.Cmd{checkVersionThenUpdateCmd()}
 		}
 		m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("Downloading %s…", m.updateAvailable)})
 		return []tea.Cmd{selfUpdateCmd()}

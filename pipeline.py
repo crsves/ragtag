@@ -109,12 +109,12 @@ if __name__ == '__main__':
     input_file = sys.argv[1] if len(sys.argv) > 1 else None
     
     if not input_file:
-        # Try to find a json file in raw/
-        raw_files = glob.glob('raw/*.json')
+        # Try to find a json or csv file in raw/
+        raw_files = glob.glob('raw/*.json') + glob.glob('raw/*.csv')
         if raw_files:
             input_file = raw_files[0]
         else:
-            print("Error: No input file specified and no JSON file found in raw/")
+            print("Error: No input file specified and no JSON/CSV file found in raw/")
             print(f"Usage: python pipeline.py [input_file] [output_dir]")
             sys.exit(1)
 

@@ -1,11 +1,13 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"runtime"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -96,6 +98,83 @@ func selfUpdateCmd() tea.Cmd {
 		}
 
 		return UpdateMsg{}
+	}
+}
+
+// FreshUpdateCheckMsg is the result of an on-demand /update version check.
+type FreshUpdateCheckMsg struct {
+	Latest string // empty if already on latest or on error
+	Err    error
+}
+
+// checkVersionThenUpdateCmd does a fresh version check when the user explicitly
+// runs /update. If a newer version is found it proceeds to download it directly;
+// if already on the latest it returns FreshUpdateCheckMsg with empty Latest.
+func checkVersionThenUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		client := &http.Client{Timeout: 8 * time.Second}
+		resp, err := client.Get(versionCheckURL)
+		if err != nil {
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("version check failed: %w", err)}
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("version check read: %w", err)}
+		}
+		var payload struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("version check parse: %w", err)}
+		}
+		if !isNewerVersion(AppVersion, payload.Version) {
+			return FreshUpdateCheckMsg{} // already on latest
+		}
+		// Newer version found — proceed to download immediately.
+		name, err := binaryName()
+		if err != nil {
+			return FreshUpdateCheckMsg{Err: err}
+		}
+		urls := []string{
+			mirrorBase + "/" + name,
+			githubBase + "/" + name,
+		}
+		var bin []byte
+		var lastErr error
+		for _, url := range urls {
+			bin, lastErr = downloadBinary(url)
+			if lastErr == nil {
+				break
+			}
+		}
+		if lastErr != nil {
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("download failed: %w", lastErr)}
+		}
+		exePath, err := os.Executable()
+		if err != nil {
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("could not resolve executable: %w", err)}
+		}
+		tmp, err := os.CreateTemp("", "ragtag-update-*")
+		if err != nil {
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("temp file: %w", err)}
+		}
+		tmpPath := tmp.Name()
+		if _, err = tmp.Write(bin); err != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("write temp: %w", err)}
+		}
+		tmp.Close()
+		if err = os.Chmod(tmpPath, 0755); err != nil {
+			os.Remove(tmpPath)
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("chmod: %w", err)}
+		}
+		if err = os.Rename(tmpPath, exePath); err != nil {
+			os.Remove(tmpPath)
+			return FreshUpdateCheckMsg{Err: fmt.Errorf("replace binary: %w", err)}
+		}
+		return FreshUpdateCheckMsg{Latest: payload.Version}
 	}
 }
 

@@ -1,20 +1,125 @@
 """
-Step 1: Normalize - Parse JSON into flat list of messages
+Step 1: Normalize - Parse JSON or email CSV into flat list of messages
 """
 import json
+import csv
+import email
+import re
 from typing import List, Dict
 from pathlib import Path
 
 
+def _parse_email_message(raw: str, file_path: str = "") -> Dict:
+    """Parse a single raw RFC 2822 email into a normalized record."""
+    msg = email.message_from_string(raw)
+
+    # Sender: prefer display name, fall back to address.
+    from_raw = msg.get("From", "unknown")
+    sender_match = re.match(r'^"?([^"<]+)"?\s*<', from_raw)
+    if sender_match:
+        sender = sender_match.group(1).strip()
+    else:
+        # address-only format
+        sender = re.sub(r'<.*?>', '', from_raw).strip() or from_raw
+
+    # Timestamp from Date header.
+    timestamp = msg.get("Date", "")
+
+    # Subject for context.
+    subject = msg.get("Subject", "")
+
+    # Body: extract plaintext part.
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                try:
+                    body = part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    )
+                    break
+                except Exception:
+                    body = str(part.get_payload())
+                    break
+    else:
+        try:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                body = payload.decode(
+                    msg.get_content_charset() or "utf-8", errors="replace"
+                )
+            else:
+                body = str(msg.get_payload())
+        except Exception:
+            body = str(msg.get_payload())
+
+    body = body.strip()
+
+    # Prepend subject so it's searchable.
+    text = f"[{subject}]\n{body}" if subject else body
+    text = text.strip()
+
+    return {
+        "sender": sender or "unknown",
+        "text": text,
+        "timestamp": timestamp,
+        "subject": subject,
+        "file": file_path,
+    }
+
+
+def normalize_email_csv(input_path: str, output_path: str) -> List[Dict]:
+    """
+    Parse a CSV where each row has columns: file, message (raw RFC 2822 email).
+    Returns normalized list of messages.
+    """
+    print(f"Reading email CSV: {input_path}...")
+    normalized = []
+    idx = 0
+    with open(input_path, newline='', encoding='utf-8', errors='replace') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            raw = row.get("message", "")
+            file_path = row.get("file", "")
+            if not raw.strip():
+                continue
+            try:
+                record = _parse_email_message(raw, file_path)
+            except Exception:
+                continue
+            if not record["text"]:
+                continue
+            record["id"] = idx
+            normalized.append(record)
+            idx += 1
+            if idx % 10000 == 0:
+                print(f"  processed {idx} emails…")
+
+    print(f"Normalized {len(normalized)} emails")
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(normalized, f, ensure_ascii=False, indent=2)
+    print(f"Saved to {output_path}")
+    return normalized
+
+
 def normalize_messages(input_path: str, output_path: str) -> List[Dict]:
     """
-    Parse JSON and extract normalized messages.
-    
+    Parse input file and extract normalized messages.
+    Supports: JSON (chat exports), CSV (email datasets).
+
     Keeps only: sender, message text, timestamp
     One message per record.
     """
+    path = Path(input_path)
+
+    # Route to email CSV parser if file ends in .csv
+    if path.suffix.lower() == ".csv":
+        return normalize_email_csv(input_path, output_path)
+
     print(f"Reading {input_path}...")
-    
+
     with open(input_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
