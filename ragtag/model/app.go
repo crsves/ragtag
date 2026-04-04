@@ -736,6 +736,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Prerendered: prerendered,
 			}
 			m.addMessage(finalMsg)
+			// Populate chunk browser so B works after any LLM answer.
+			if len(m.streamSources) > 0 {
+				m.ragBrowseChunks = make([]workers.Result, len(m.streamSources))
+				copy(m.ragBrowseChunks, m.streamSources)
+				m.ragBrowseCursor = 0
+				m.ragBrowseCtxOpen = false
+			}
 		}
 		m.streamSources = nil
 		if msg.Err != nil {
@@ -794,6 +801,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			if strings.HasPrefix(msg.Payload, "[LLM error:") {
 				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("details logged to %s", filepath.Join(m.ragDir, "ragtag.log"))})
+			}
+			// Populate chunk browser with all sources from this agent run so B works.
+			if len(m.streamSources) > 0 {
+				m.ragBrowseChunks = make([]workers.Result, len(m.streamSources))
+				copy(m.ragBrowseChunks, m.streamSources)
+				m.ragBrowseCursor = 0
+				m.ragBrowseCtxOpen = false
 			}
 			m.resetAgentState()
 
@@ -1029,6 +1043,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// Schedule next poll in 10 minutes regardless of result.
+		cmds = append(cmds, repeatingVersionCheckCmd(10*time.Minute))
 
 	// ── Chat file loaded ───────────────────────────────────────────────────
 	case ChatFileLoadedMsg:
@@ -2830,6 +2846,95 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 		})
 		m.streamSources = nil
 		return nil
+	}
+
+	// ── Show chunk cards before LLM answer + enable B-to-browse ────────────
+	if len(m.streamSources) > 0 {
+		dimStyle2 := lipgloss.NewStyle().Foreground(ui.ColorDim)
+		rankStyle2 := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+		scoreStyle2 := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+		starStyle2 := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+		srcStyle2 := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+		textStyle2 := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
+		cardWidth2 := m.width - 4
+		if cardWidth2 < 24 {
+			cardWidth2 = 24
+		}
+		innerWidth2 := cardWidth2 - 6
+
+		var chunkSB strings.Builder
+		for i, r := range m.streamSources {
+			score := r.RerankScore
+			if score == 0 {
+				score = r.Score
+			}
+			const barLen = 10
+			filled := clampScoreBarFill(score, barLen)
+			bar := scoreStyle2.Render(strings.Repeat("█", filled)) +
+				dimStyle2.Render(strings.Repeat("░", barLen-filled))
+			star := dimStyle2.Render("·")
+			if r.KeywordBoosted {
+				star = starStyle2.Render("★")
+			}
+			ts := browserDisplayTimestamp(r.Chunk.TimestampStart)
+			meta := rankStyle2.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
+				bar + "  " +
+				scoreStyle2.Render(fmt.Sprintf("%.4f", score)) + "  " +
+				star + "  " +
+				srcStyle2.Render(r.Source) + "  " +
+				dimStyle2.Render(ts)
+			text := sanitizeBrowserChunkText(r.Chunk.Text, r.Chunk.Sender)
+			maxLen2 := innerWidth2 * 3
+			if maxLen2 < 80 {
+				maxLen2 = 80
+			}
+			if len(text) > maxLen2 {
+				text = text[:maxLen2] + "…"
+			}
+			runes2 := []rune(text)
+			var lines2 []string
+			for len(runes2) > innerWidth2 {
+				cut := innerWidth2
+				for cut > 0 && runes2[cut] != ' ' {
+					cut--
+				}
+				if cut == 0 {
+					cut = innerWidth2
+				}
+				lines2 = append(lines2, string(runes2[:cut]))
+				runes2 = []rune(strings.TrimLeft(string(runes2[cut:]), " "))
+			}
+			if len(runes2) > 0 {
+				lines2 = append(lines2, string(runes2))
+			}
+			sep2 := dimStyle2.Render(strings.Repeat("─", innerWidth2))
+			body2 := meta + "\n" + sep2 + "\n" + textStyle2.Render(strings.Join(lines2, "\n"))
+			borderColor2 := ui.ColorDim
+			if i == 0 {
+				borderColor2 = ui.ColorCyan
+			}
+			card2 := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(borderColor2).
+				Padding(0, 1).
+				Width(cardWidth2).
+				Render(body2)
+			if i > 0 {
+				chunkSB.WriteString("\n")
+			}
+			chunkSB.WriteString(card2)
+		}
+		hint := dimStyle2.Render(fmt.Sprintf("  %d chunks retrieved  ·  press ", len(m.streamSources))) +
+			lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true).Render("B") +
+			dimStyle2.Render(" to browse")
+		chunkSB.WriteString("\n" + hint)
+		m.addMessage(ChatMessage{Role: "system", Content: chunkSB.String(), Prerendered: true})
+		// Populate browser so B works immediately.
+		m.ragBrowseChunks = make([]workers.Result, len(m.streamSources))
+		copy(m.ragBrowseChunks, m.streamSources)
+		m.ragBrowseCursor = 0
+		m.ragBrowseCtxOpen = false
 	}
 
 	// Find the query from the last user message.

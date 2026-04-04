@@ -48,6 +48,32 @@ func checkVersionCmd() tea.Cmd {
 	}
 }
 
+// repeatingVersionCheckCmd sleeps for d then performs a version check.
+// The VersionCheckMsg handler should re-schedule this to create a poll loop.
+func repeatingVersionCheckCmd(d time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(d)
+		client := &http.Client{Timeout: 8 * time.Second}
+		resp, err := client.Get(versionCheckURL)
+		if err != nil {
+			return VersionCheckMsg{Err: err}
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return VersionCheckMsg{Err: fmt.Errorf("read: %w", err)}
+		}
+		var payload struct {
+			Version   string `json:"version"`
+			Changelog string `json:"changelog"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return VersionCheckMsg{Err: fmt.Errorf("parse: %w", err)}
+		}
+		return VersionCheckMsg{Latest: payload.Version, Changelog: payload.Changelog}
+	}
+}
+
 // isNewerVersion returns true if remote is a newer semver than local.
 // Handles "v0.1.4" style strings.
 func isNewerVersion(local, remote string) bool {
