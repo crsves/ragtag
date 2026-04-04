@@ -6,6 +6,7 @@ Keeps the retriever loaded in memory for fast repeated queries.
 """
 import io
 import json
+import re
 import sys
 import os
 import traceback
@@ -188,15 +189,35 @@ def handle(req):
         cm = get_chat_manager()
         chat = cm.get_active_chat()
         if not chat:
-            return {"error": "no active chat"}
+            # No active chat yet — do a full build and register this file as a new chat.
+            try:
+                ensure_imports()
+                from pipeline import build_rag_system
+                stem = Path(file_path).stem  # e.g. "slack.json" → "slack"
+                slug = re.sub(r"[^a-z0-9_-]", "-", stem.lower()).strip("-") or "default"
+                store_dir = str(RAG_DIR / "processed" / "chats" / slug)
+                build_rag_system(input_file=file_path, output_dir=store_dir)
+                cm.register(
+                    slug=slug,
+                    display_name=stem,
+                    store_dir=str(Path(store_dir) / "vector_store"),
+                    chunks_file=str(Path(store_dir) / "chunks.json"),
+                    raw_file=file_path,
+                )
+                cm.set_active(slug)
+                _retriever = None
+                _retriever_chat = None
+                return {"ok": True, "message": f"Created and indexed new chat '{stem}' from '{os.path.basename(file_path)}'"}
+            except Exception as e:
+                return {"error": f"ingest (new chat) failed: {e}"}
         try:
             from update import RAGUpdater
             store_dir = str(chat.get("store_dir", ""))
-            updater = RAGUpdater(store_dir=store_dir + "/vector_store")
+            updater = RAGUpdater(store_dir=store_dir)
             updater.update_from_new_file(file_path)
             _retriever = None
             _retriever_chat = None
-            return {"ok": True, "message": f"Ingested data from '{file_path}'"}
+            return {"ok": True, "message": f"Ingested data from '{file_path}' into '{cm.get_active_slug()}'"}
         except Exception as e:
             return {"error": f"ingest failed: {e}"}
 
