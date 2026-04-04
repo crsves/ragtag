@@ -353,6 +353,22 @@ func (b *Bridge) SetChat(slug string) error {
 	return nil
 }
 
+// CheckLatest returns the latest ingested timestamp and suggested export range.
+func (b *Bridge) CheckLatest() (map[string]interface{}, error) {
+	raw, err := b.sendRaw(bridgeRequest{Cmd: "check"})
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal check: %w", err)
+	}
+	if errVal, ok := m["error"].(string); ok && errVal != "" {
+		return nil, fmt.Errorf("bridge error: %s", errVal)
+	}
+	return m, nil
+}
+
 // Stats returns index statistics for the current chat as a generic map so that
 // any fields the bridge chooses to send are preserved.
 func (b *Bridge) Stats() (map[string]interface{}, error) {

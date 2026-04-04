@@ -75,6 +75,12 @@ type StatsMsg struct {
 	Err   error
 }
 
+// CheckResultMsg carries the result of a "what to export next" check.
+type CheckResultMsg struct {
+	Data map[string]interface{}
+	Err  error
+}
+
 // ChatFileListMsg carries the list of raw chat JSON files.
 type ChatFileListMsg struct {
 	Files []string
@@ -112,6 +118,8 @@ var allCommands = []cmdSuggestion{
 	{"/help", "show command reference", 9},
 	{"/stats", "show index statistics", 10},
 	{"/pipeline", "open pipeline management", 10},
+	{"/ingest", "pick a raw/ file and ingest it", 10},
+	{"/check", "show what date range to export next", 10},
 	{"/view", "browse raw chat history", 10},
 	{"/confident", "toggle confident mode", 11},
 	{"/thinking", "toggle thinking mode", 12},
@@ -220,10 +228,11 @@ var pipelineMenuItems = []struct {
 	label  string
 	action string
 }{
+	{"Ingest new data (incremental)", "ingest"},
+	{"Check — what to export next", "check"},
 	{"Rebuild full index from raw data", "rebuild"},
 	{"Test retrieval (no LLM call)", "test"},
 	{"Show index stats", "stats"},
-	{"Ingest new data (incremental)", "ingest"},
 }
 
 // ─── AppModel ─────────────────────────────────────────────────────────────────
@@ -308,10 +317,12 @@ type AppModel struct {
 	ifaceSettingsCursor int
 
 	// Pipeline screen
-	pipelineCursor    int
-	pipelineInputMode bool   // true = capturing text input (query / file path)
-	pipelineInput     string // text typed in pipeline input mode
-	pipelinePrompt    string // what we're asking for ("query" or "file")
+	pipelineCursor      int
+	pipelineInputMode   bool   // true = capturing text input (query / file path)
+	pipelineInput       string // text typed in pipeline input mode
+	pipelinePrompt      string // what we're asking for ("query" or "file")
+	pipelineFilePicking bool   // true = showing raw/ file picker for ingest
+	pipelineFileCursor  int    // cursor within file picker list
 
 	// Chat file viewer
 	chatFileList      []string
@@ -734,11 +745,53 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Chat file list ─────────────────────────────────────────────────────
 	case ChatFileListMsg:
 		if msg.Err != nil {
+			m.pipelineFilePicking = false
 			m.addMessage(ChatMessage{Role: "error", Content: "Could not list raw files: " + msg.Err.Error()})
 			m.screen = ScreenChat
 		} else {
 			m.chatFileList = msg.Files
-			m.chatFileCursor = 0
+			if m.pipelineFilePicking {
+				m.pipelineFileCursor = 0
+			} else {
+				m.chatFileCursor = 0
+			}
+		}
+
+	// ── Check / export-range result ────────────────────────────────────────
+	case CheckResultMsg:
+		if msg.Err != nil {
+			m.addMessage(ChatMessage{Role: "error", Content: "Check error: " + msg.Err.Error()})
+		} else {
+			accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+			dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
+			valStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+			warnStyle   := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+
+			latest, _      := msg.Data["latest"].(string)
+			exportAfter, _ := msg.Data["export_after"].(string)
+			hoursF, _      := msg.Data["hours_behind"].(float64)
+			hours          := int(hoursF)
+
+			var sb strings.Builder
+			if latest == "" {
+				sb.WriteString(warnStyle.Render("⚠  No data in store yet.") + "\n")
+				sb.WriteString(dimStyle.Render("   Run a full pipeline rebuild to get started."))
+			} else {
+				behind := fmt.Sprintf("%dh behind", hours)
+				if hours > 48 {
+					behind = warnStyle.Render(behind)
+				} else {
+					behind = dimStyle.Render(behind)
+				}
+				sb.WriteString(accentStyle.Render("◆ Export range for next ingest") + "\n\n")
+				sb.WriteString(dimStyle.Render("  Latest in store : ") + valStyle.Render(latest) + "  " + behind + "\n")
+				sb.WriteString(dimStyle.Render("  Export after    : ") + valStyle.Render(exportAfter) + "\n\n")
+				sb.WriteString(dimStyle.Render("  DiscordChatExporter flag:\n"))
+				sb.WriteString(valStyle.Render(fmt.Sprintf(`    --after "%s"`, exportAfter)) + "\n\n")
+				sb.WriteString(dimStyle.Render("  Then drop the export JSON into ") + valStyle.Render("raw/") + dimStyle.Render(" and run ") + accentStyle.Render("/ingest"))
+			}
+			m.screen = ScreenChat
+			m.addMessage(ChatMessage{Role: "system", Content: sb.String()})
 		}
 
 	// ── Chat file loaded ───────────────────────────────────────────────────
@@ -1286,6 +1339,33 @@ func (m AppModel) viewInterfaceSettingsContent() string {
 
 func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
         m.acConsumedKey = true
+
+        // ── file picker mode (ingest) ─────────────────────────────────────────
+        if m.pipelineFilePicking {
+                switch msg.Type {
+                case tea.KeyEsc:
+                        m.pipelineFilePicking = false
+                case tea.KeyUp:
+                        if m.pipelineFileCursor > 0 {
+                                m.pipelineFileCursor--
+                        }
+                case tea.KeyDown:
+                        if m.pipelineFileCursor < len(m.chatFileList)-1 {
+                                m.pipelineFileCursor++
+                        }
+                case tea.KeyEnter:
+                        if len(m.chatFileList) > 0 {
+                                filename := m.chatFileList[m.pipelineFileCursor]
+                                path := filepath.Join(m.ragDir, "raw", filename)
+                                m.pipelineFilePicking = false
+                                m.screen = ScreenChat
+                                return []tea.Cmd{pipelineIngestCmd(m.bridge, path)}
+                        }
+                }
+                return nil
+        }
+
+        // ── text input mode (test query) ──────────────────────────────────────
         if m.pipelineInputMode {
                 switch msg.Type {
                 case tea.KeyEsc:
@@ -1299,8 +1379,6 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
                         switch action {
                         case "test":
                                 return []tea.Cmd{pipelineTestCmd(m.bridge, input, m.settings.FinalK, m.tuiState.Window)}
-                        case "ingest":
-                                return []tea.Cmd{pipelineIngestCmd(m.bridge, input)}
                         }
                 case tea.KeyBackspace, tea.KeyDelete:
                         if len(m.pipelineInput) > 0 {
@@ -1314,6 +1392,8 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
                 }
                 return nil
         }
+
+        // ── menu navigation ───────────────────────────────────────────────────
         switch msg.Type {
         case tea.KeyEsc:
                 m.screen = ScreenSettingsMenu
@@ -1333,48 +1413,79 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
                 case "stats":
                         m.screen = ScreenChat
                         return []tea.Cmd{fetchStatsCmd(m.bridge)}
+                case "check":
+                        m.screen = ScreenChat
+                        return []tea.Cmd{fetchCheckCmd(m.bridge)}
                 case "test":
                         m.pipelineInputMode = true
                         m.pipelinePrompt = "Enter query"
                         m.pipelineInput = ""
                 case "ingest":
-                        m.pipelineInputMode = true
-                        m.pipelinePrompt = "Enter file path"
-                        m.pipelineInput = ""
+                        m.pipelineFilePicking = true
+                        m.pipelineFileCursor = 0
+                        return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
                 }
         }
         return nil
 }
 
 func (m AppModel) viewPipelineContent() string {
+        accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+        dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
+        valStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
         var sb strings.Builder
         sb.WriteString(ui.TitleStyle.Render("Pipeline Management") + "\n\n")
-        if m.pipelineInputMode {
+
+        if m.pipelineFilePicking {
+                // ── file picker ───────────────────────────────────────────────
+                sb.WriteString(accentStyle.Render("◆ Ingest — pick file from raw/") + "\n\n")
+                if len(m.chatFileList) == 0 {
+                        sb.WriteString(dimStyle.Render("  No JSON files found in raw/") + "\n\n")
+                        sb.WriteString(dimStyle.Render("  Drop your chat export JSON into the ") +
+                                valStyle.Bold(true).Render("raw/") +
+                                dimStyle.Render(" directory, then come back here."))
+                } else {
+                        for i, f := range m.chatFileList {
+                                isSelected := i == m.pipelineFileCursor
+                                if isSelected {
+                                        sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") + valStyle.Bold(true).Render(f) + "\n")
+                                } else {
+                                        sb.WriteString(dimStyle.Render("  "+f) + "\n")
+                                }
+                        }
+                }
+                sb.WriteString("\n")
+                sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: ingest · ESC: back"))
+
+        } else if m.pipelineInputMode {
+                // ── text input ────────────────────────────────────────────────
                 sb.WriteString(ui.SystemMsgStyle.Render(m.pipelinePrompt+": ") + ui.ActiveFlagStyle.Render(m.pipelineInput+"_"))
                 sb.WriteString("\n\n")
                 sb.WriteString(ui.HelpStyle.Render("Enter to confirm · ESC to cancel"))
+
         } else {
+                // ── menu ──────────────────────────────────────────────────────
+                descriptions := map[string]string{
+                        "ingest":  "incrementally add a new chat export from raw/",
+                        "check":   "show what date range to export from Discord/Slack",
+                        "rebuild": "reprocess all raw data from scratch",
+                        "test":    "run a retrieval query without calling the LLM",
+                        "stats":   "show chunk count and index info",
+                }
                 for i, item := range pipelineMenuItems {
                         isSelected := i == m.pipelineCursor
-                        marker := "  "
-                        numStr := fmt.Sprintf("[%d]", i+1)
                         if isSelected {
-                                marker = ui.ActiveFlagStyle.Render("▶ ")
-                                numStr = ui.TitleStyle.Render(numStr)
+                                sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") +
+                                        accentStyle.Render(item.label) + "\n")
+                                sb.WriteString(dimStyle.Render("    "+descriptions[item.action]) + "\n\n")
                         } else {
-                                numStr = ui.SystemMsgStyle.Render(numStr)
+                                sb.WriteString(dimStyle.Render("  "+item.label) + "\n\n")
                         }
-                        label := item.label
-                        if isSelected {
-                                label = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(label)
-                        } else {
-                                label = ui.SystemMsgStyle.Render(label)
-                        }
-                        sb.WriteString(fmt.Sprintf("%s%s %s\n", marker, numStr, label))
                 }
-                sb.WriteString("\n")
                 sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: run · ESC: back"))
         }
+
         return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
                 ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
         )
@@ -1866,6 +1977,17 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.pipelineCursor = 0
 		m.pipelineInputMode = false
 		m.pipelineInput = ""
+		m.pipelineFilePicking = false
+
+	case "/ingest":
+		m.screen = ScreenPipeline
+		m.pipelineCursor = 0
+		m.pipelineFilePicking = true
+		m.pipelineFileCursor = 0
+		return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
+
+	case "/check":
+		return []tea.Cmd{fetchCheckCmd(m.bridge)}
 
 	case "/view":
 		m.screen = ScreenChatList
@@ -2726,6 +2848,8 @@ func (m AppModel) buildHelpContent() string {
 		{"/rag", "toggle RAG-only mode (skip LLM)"},
 		{"/pause", "pause / cancel the current AI operation"},
 		{"/pipeline", "open pipeline management screen"},
+		{"/ingest", "pick a file from raw/ and ingest it"},
+		{"/check", "show what date range to export next"},
 		{"/view", "browse and read raw chat JSON files"},
 		{"/chats", "switch between chats"},
 		{"/settings", "open settings categories"},
@@ -2990,6 +3114,16 @@ func fetchStatsCmd(bridge *workers.Bridge) tea.Cmd {
 		}
 		stats, err := bridge.Stats()
 		return StatsMsg{Stats: stats, Err: err}
+	}
+}
+
+func fetchCheckCmd(bridge *workers.Bridge) tea.Cmd {
+	return func() tea.Msg {
+		if bridge == nil {
+			return CheckResultMsg{Err: fmt.Errorf("bridge not initialised")}
+		}
+		data, err := bridge.CheckLatest()
+		return CheckResultMsg{Data: data, Err: err}
 	}
 }
 

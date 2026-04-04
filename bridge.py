@@ -270,6 +270,29 @@ def handle(req):
             "last_updated": chat.get("last_updated", "?"),
         }
 
+    elif cmd == "check":
+        from update import get_latest_timestamp
+        from datetime import datetime, timezone
+        cm = get_chat_manager()
+        chat = cm.get_active_chat()
+        if not chat:
+            return {"error": "no active chat"}
+        store_dir = str(chat.get("store_dir", "")) + "/vector_store"
+        latest = get_latest_timestamp(store_dir)
+        if not latest:
+            return {"ok": True, "latest": "", "export_after": "", "hours_behind": -1}
+        dt = datetime.fromisoformat(latest)
+        dt_utc = dt.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        hours = int((now_utc - dt_utc).total_seconds() / 3600)
+        export_after = dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+        return {
+            "ok": True,
+            "latest": dt_utc.strftime('%Y-%m-%d %H:%M UTC'),
+            "export_after": export_after,
+            "hours_behind": hours,
+        }
+
     elif cmd == "list_raw_files":
         raw_dir = RAG_DIR / "raw"
         if raw_dir.is_dir():
