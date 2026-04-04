@@ -295,9 +295,13 @@ type AppModel struct {
 	chatSlugList []string // ordered slug list for display
 
 	// Misc
-	errMsg      string
-	bridgeReady bool
-	mdRenderer  *glamour.TermRenderer
+	errMsg        string
+	bridgeReady   bool
+	mdRenderer    *glamour.TermRenderer
+	shouldRestart bool // set to true when user picks "restart" after /update
+
+	// Clarify overlay (shown above input row)
+	clarify ClarifyState
 
 	// Autocomplete
 	acSuggestions []cmdSuggestion
@@ -564,7 +568,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sb.WriteString(keyStyle.Render("  retrieved") + dimStyle.Render(" = ") +
 					valStyle.Render(fmt.Sprintf("%d chunks, %d chars context", len(msg.Results), len(msg.Context))) + "\n")
 			}
-			m.addMessage(ChatMessage{Role: "system", Content: "debug · retrieval stats\n" + sb.String()})
+			m.addMessage(ChatMessage{Role: "system", Content: "debug · retrieval stats\n" + sb.String(), Prerendered: true})
 
 			// Results table — in debug mode show up to 10 with full detail.
 			limit := len(msg.Results)
@@ -603,7 +607,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							star +
 							valStyle.Render(fmt.Sprintf("  %-8s %-19s  %s", src, ts, text)) + "\n")
 				}
-				m.addMessage(ChatMessage{Role: "system", Content: "debug · top results\n" + rb.String()})
+				m.addMessage(ChatMessage{Role: "system", Content: "debug · top results\n" + rb.String(), Prerendered: true})
 			}
 		}
 		cmds = append(cmds, m.startStreamingCmd(msg.Context)...)
@@ -623,14 +627,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = m.messages[:len(m.messages)-1]
 		}
 		if content != "" {
+			// Try clarify mode first.
+			if cs, ok := ParseClarifyOutput(content); ok {
+				cs.OriginalQuery = m.lastUserQuery()
+				m.clarify = *cs
+				m.renderMessages()
+				return m, tea.Batch(cmds...)
+			}
 			// Try to parse and render rich/structured JSON output.
+			prerendered := false
 			if rendered, ok := ParseRichOutput(content, m.width); ok {
 				content = rendered
+				prerendered = true
 			}
 			finalMsg := ChatMessage{
-				Role:    "assistant",
-				Content: content,
-				Sources: m.streamSources,
+				Role:        "assistant",
+				Content:     content,
+				Sources:     m.streamSources,
+				Prerendered: prerendered,
 			}
 			m.addMessage(finalMsg)
 		}
@@ -810,9 +824,17 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.addMessage(ChatMessage{Role: "error", Content: "Update failed: " + msg.Err.Error()})
 		} else {
-			accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-			dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
-			m.addMessage(ChatMessage{Role: "system", Content: accentStyle.Render("✓  Updated!") + "  " + dimStyle.Render("Restart ragtag to use the new version.")})
+			m.clarify = ClarifyState{
+				Active:   true,
+				Kind:     ClarifyKindRestart,
+				Question: "ragtag updated successfully! Restart now to use the new version?",
+				Options: []ClarifyOption{
+					{ID: "yes", Label: "Restart now"},
+					{ID: "no",  Label: "Later"},
+				},
+				Cursor:           0,
+				SuggestedDefault: "yes",
+			}
 		}
 
 
@@ -838,6 +860,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Key events ─────────────────────────────────────────────────────────
 	case tea.KeyMsg:
+		// Intercept keys for clarify overlay when active.
+		if m.clarify.Active {
+			cmds = append(cmds, m.handleClarifyKey(msg)...)
+			return m, tea.Batch(cmds...)
+		}
 		// Global quit
 		if msg.Type == tea.KeyCtrlC || msg.String() == "ctrl+q" {
 			m.saveState()
@@ -2340,7 +2367,7 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 		}
 		notice := accentStyle.Render("◆ "+label) +
 			dimStyle.Render(fmt.Sprintf("  %d %s retrieved", n, chunkWord))
-		m.addMessage(ChatMessage{Role: "system", Content: notice})
+		m.addMessage(ChatMessage{Role: "system", Content: notice, Prerendered: true})
 
 		// ── card layout ─────────────────────────────────────────────────────
 		cardWidth := m.width - 4
@@ -2432,9 +2459,10 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 
 		m.appState = StateIdle
 		m.addMessage(ChatMessage{
-			Role:    "assistant",
-			Content: sb.String(),
-			Sources: m.streamSources,
+			Role:        "assistant",
+			Content:     sb.String(),
+			Sources:     m.streamSources,
+			Prerendered: true,
 		})
 		m.streamSources = nil
 		return nil
@@ -2535,7 +2563,6 @@ func (m AppModel) renderMessage(msg ChatMessage) string {
 		if len(msg.Sources) > 0 || len(msg.Searches) > 0 {
 			label = "[RAG]"
 		}
-		// Use warm amber colour while the message is still streaming.
 		var header string
 		if msg.Streaming {
 			header = ui.AIStreamingMsgStyle.Render(label)
@@ -2543,12 +2570,18 @@ func (m AppModel) renderMessage(msg ChatMessage) string {
 			header = ui.AssistantMsgStyle.Render(label)
 		}
 		rendered := msg.Content
-		if m.mdRenderer != nil && !msg.Streaming {
+		// Skip markdown rendering for pre-rendered lipgloss content.
+		if !msg.Prerendered && m.mdRenderer != nil && !msg.Streaming {
 			if md, err := m.mdRenderer.Render(msg.Content); err == nil {
 				rendered = strings.TrimRight(md, "\n")
 			}
 		}
-		sb.WriteString(header + " " + rendered)
+		if msg.Prerendered {
+			// Cards already include full styling — just show them without header/wrap.
+			sb.WriteString("\n" + rendered)
+		} else {
+			sb.WriteString(header + " " + rendered)
+		}
 		if m.tuiState.ShowSources && len(msg.Sources) > 0 {
 			sb.WriteString("\n")
 			sb.WriteString(renderSourceTable(msg.Sources, m.tuiState.Window))
@@ -2559,6 +2592,9 @@ func (m AppModel) renderMessage(msg ChatMessage) string {
 		return ui.AgentStepStyle.Render("  " + msg.Content)
 
 	case "system":
+		if msg.Prerendered {
+			return "  " + msg.Content
+		}
 		return ui.SystemMsgStyle.Render("↦ " + msg.Content)
 
 	case "error":
@@ -2680,6 +2716,10 @@ func (m AppModel) viewMain() string {
 	}
 	inputRow := m.renderInputRow()
 	statusBar := m.renderStatusBar()
+	if m.clarify.Active {
+		clarifyPanel := RenderClarify(&m.clarify, m.width)
+		return lipgloss.JoinVertical(lipgloss.Left, content, clarifyPanel, inputRow, statusBar)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, content, inputRow, statusBar)
 }
 
@@ -3311,11 +3351,11 @@ func buildPrompt(query, retrievedContext, customTemplate, outputMode string) str
 	var schemaBlock string
 	switch outputMode {
 	case "rich":
-		schemaBlock = richOutputSchema
+		schemaBlock = richOutputSchema + clarifySchema
 	case "structured":
-		schemaBlock = structuredOutputSchema
+		schemaBlock = structuredOutputSchema + clarifySchema
 	default:
-		schemaBlock = plainOutputRules
+		schemaBlock = plainOutputRules + clarifySchema
 	}
 
 	return fmt.Sprintf(`You are an expert assistant. Answer the user's question using only the context provided below.
@@ -3407,7 +3447,11 @@ func (m AppModel) viewportHeight() int {
 		}
 		acHeight = n
 	}
-	h := m.height - 4 - acHeight
+	clarifyHeight := 0
+	if m.clarify.Active {
+		clarifyHeight = m.clarify.PanelHeight()
+	}
+	h := m.height - 4 - acHeight - clarifyHeight
 	if h < 5 {
 		return 5
 	}

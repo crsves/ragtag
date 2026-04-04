@@ -41,4 +41,5 @@ type ChatMessage struct {
 	Searches      []string         // for agentic answers
 	NumSearches   int
 	Streaming     bool // true while content is actively being streamed
+	Prerendered   bool // content is already lipgloss-rendered; skip mdRenderer and extra wrapping
 }

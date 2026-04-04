@@ -86,6 +86,28 @@ RULES:
 - key_points should be 2-5 short bullet items.
 `
 
+const clarifySchema = `
+CLARIFICATION — if (and ONLY if) the query is genuinely ambiguous with multiple distinct plausible intents, you MAY respond with ONLY this JSON instead of an answer:
+
+{
+  "mode": "clarify",
+  "question": "Which do you mean?",
+  "options": [
+    {"id": "A", "label": "Specific option A"},
+    {"id": "B", "label": "Specific option B"}
+  ],
+  "suggested_default": "A",
+  "allow_free_input": false
+}
+
+STRICT rules for clarify:
+- Only trigger for GENUINE ambiguity (2+ distinct intents that produce very different answers).
+- NEVER clarify obvious queries, follow-ups, or when context makes intent clear.
+- Provide 2–4 mutually exclusive, specific options. Never vague options.
+- Do NOT ask "Can you clarify?" in plain text — use the JSON format or answer directly.
+- If in doubt, make a reasonable assumption and answer.
+`
+
 const plainOutputRules = `
 RULES for your answer:
 - NEVER use markdown tables (|---|---|). Write data as prose or simple lists instead.
