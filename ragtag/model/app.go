@@ -365,6 +365,11 @@ type AppModel struct {
 	pipelineFilePicking bool   // true = showing raw/ file picker for ingest
 	pipelineFileCursor  int    // cursor within file picker list
 
+	// Ingest progress
+	ingestInProgress bool
+	ingestFilename   string // base filename being ingested (for status bar)
+	ingestNewSlug    string // derived slug for the switch-chat prompt
+
 	// Chat file viewer
 	chatFileList       []string
 	chatFileCursor     int
@@ -575,7 +580,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if m.appState != StateIdle {
+		if m.appState != StateIdle || m.ingestInProgress {
 			cmds = append(cmds, cmd)
 		}
 
@@ -862,6 +867,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PipelineResultMsg:
 		m.screen = ScreenChat
 		if msg.Err != nil {
+			m.ingestInProgress = false
 			if isBridgePipeError(msg.Err) {
 				// Bridge process died — kill it and restart automatically.
 				if m.bridge != nil {
@@ -874,6 +880,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.addMessage(ChatMessage{Role: "error", Content: fmt.Sprintf("[pipeline/%s] %v", msg.Action, msg.Err)})
 			}
+		} else if msg.Action == "ingest" {
+			m.ingestInProgress = false
+			// Refresh chat list and offer to switch to the newly indexed chat.
+			slug := m.ingestNewSlug
+			m.ingestFilename = ""
+			m.clarify = ClarifyState{
+				Active:   true,
+				Kind:     ClarifyKindIngestSwitch,
+				Question: fmt.Sprintf("✓ Ingest complete — switch to %q now?", slug),
+				Options: []ClarifyOption{
+					{ID: "yes", Label: "Switch now"},
+					{ID: "no", Label: "Stay here"},
+				},
+			}
+			cmds = append(cmds, fetchChatListCmd(m.bridge))
 		} else {
 			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("✓ [%s] %s", msg.Action, msg.Message)})
 		}
@@ -1569,8 +1590,10 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
 				path := filepath.Join(m.ragDir, "raw", filename)
 				m.pipelineFilePicking = false
 				m.screen = ScreenChat
-				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("⏳ Ingesting %q — this may take a few minutes...", filename)})
-				return []tea.Cmd{pipelineIngestCmd(m.bridge, path)}
+				m.ingestInProgress = true
+				m.ingestFilename = filename
+				m.ingestNewSlug = deriveSlugFromFilename(filename)
+				return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, path)}
 			}
 		}
 		return nil
@@ -3095,6 +3118,15 @@ func (m AppModel) renderStatusBar() string {
 	if m.needsAPIKeyWarning() {
 		parts = append(parts, ui.ErrorMsgStyle.Render("[set NIM API key or /rag]"))
 	}
+	if m.ingestInProgress {
+		ingestPill := lipgloss.NewStyle().
+			Foreground(ui.ColorDim).
+			Background(ui.ColorCyan).
+			Bold(true).
+			Padding(0, 1).
+			Render(m.spinner.View() + " ingesting " + m.ingestFilename)
+		parts = append(parts, ingestPill)
+	}
 
 	bar := strings.Join(parts, "  ")
 
@@ -3719,6 +3751,28 @@ func restartBridgeCmd(ragDir string) tea.Cmd {
 		}
 		return BridgeRestartedMsg{Bridge: b}
 	}
+}
+
+// deriveSlugFromFilename converts a filename to the slug the bridge would assign.
+// Mirrors bridge.py: stem → lowercase → replace non-alphanumeric/dash/underscore with '-'.
+func deriveSlugFromFilename(filename string) string {
+	base := filepath.Base(filename)
+	if idx := strings.LastIndex(base, "."); idx > 0 {
+		base = base[:idx]
+	}
+	var slug strings.Builder
+	for _, ch := range strings.ToLower(base) {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+			slug.WriteRune(ch)
+		} else {
+			slug.WriteRune('-')
+		}
+	}
+	result := strings.Trim(slug.String(), "-")
+	if result == "" {
+		return "default"
+	}
+	return result
 }
 
 func pipelineRebuildCmd(bridge *workers.Bridge) tea.Cmd {
@@ -4556,8 +4610,8 @@ func (m *AppModel) renderRagBrowserCard(r workers.Result, idx int) string {
 	srcStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
 	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-	cardWidth := m.ragBrowserInnerWidth()
-	innerWidth := max(16, cardWidth-6)
+	cardWidth := m.ragBrowserInnerWidth() - 4 // subtract border(2) + padding(2) overhead
+	innerWidth := max(16, cardWidth-4)
 
 	score := r.RerankScore
 	if score == 0 {
@@ -4621,8 +4675,8 @@ func (m *AppModel) renderRagBrowserCtx() string {
 	tsStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow)
 	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-	cardWidth := m.ragBrowserInnerWidth()
-	innerWidth := max(20, cardWidth-6)
+	cardWidth := m.ragBrowserInnerWidth() - 4 // subtract card border(2) + padding(2) overhead
+	innerWidth := max(20, cardWidth-4)
 
 	var lines []string
 	title := titleStyle.Render(fmt.Sprintf("Context window — chunk #%d", m.ragBrowseCursor+1))

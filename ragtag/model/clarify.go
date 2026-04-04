@@ -13,9 +13,10 @@ import (
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 const (
-	ClarifyKindLLM     = "llm"     // re-runs the pipeline with clarification context
-	ClarifyKindRestart = "restart" // restarts the binary after /update
-	ClarifyKindUpdate  = "update"  // startup update notification prompt
+	ClarifyKindLLM          = "llm"          // re-runs the pipeline with clarification context
+	ClarifyKindRestart      = "restart"      // restarts the binary after /update
+	ClarifyKindUpdate       = "update"       // startup update notification prompt
+	ClarifyKindIngestSwitch = "ingest_switch" // prompt to switch chat after ingest
 )
 
 type ClarifyOption struct {
@@ -234,6 +235,12 @@ func (m *AppModel) submitClarifyAnswer(id, label string) []tea.Cmd {
 			m.addMessage(ChatMessage{Role: "system", Content: "Updating ragtag…"})
 			cmds = append(cmds, selfUpdateCmd())
 		}
+
+	case ClarifyKindIngestSwitch:
+		if id == "yes" {
+			cmds = append(cmds, switchChatCmd(m.bridge, m.ingestNewSlug))
+		}
+		m.ingestNewSlug = ""
 
 	case ClarifyKindLLM:
 		// Re-run retrieval+LLM with original query appended with the clarification.
