@@ -182,6 +182,7 @@ type TUIState struct {
 	RAGOnly        bool    `json:"rag_only"`
 	MinResults     int     `json:"min_results"`      // adaptive retrieval floor
 	ScoreThreshold float64 `json:"score_threshold"`  // rerank score cutoff (0 = disabled)
+	OutputMode     string  `json:"output_mode"`      // "plain" | "structured" | "rich"
 }
 
 // LoadTUIState reads the JSON state file. Returns sensible defaults on any error.

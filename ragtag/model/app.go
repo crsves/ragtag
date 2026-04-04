@@ -110,6 +110,7 @@ var allCommands = []cmdSuggestion{
 	{"/sources", "toggle source table in replies", 2},
 	{"/agent", "toggle / run agentic mode", 3},
 	{"/pause", "pause/stop current AI response", 3},
+	{"/mode", "set output mode: plain / structured / rich", 4},
 	{"/model", "set model by name/number/nickname", 4},
 	{"/k", "set final_k (chunks passed to LLM)", 5},
 	{"/window", "set context window size", 6},
@@ -616,6 +617,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = m.messages[:len(m.messages)-1]
 		}
 		if content != "" {
+			// Try to parse and render rich/structured JSON output.
+			if rendered, ok := ParseRichOutput(content, m.width); ok {
+				content = rendered
+			}
 			finalMsg := ChatMessage{
 				Role:    "assistant",
 				Content: content,
@@ -1897,6 +1902,61 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.saveState()
 		m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("rag-only: %v", m.tuiState.RAGOnly)})
 
+	case "/mode":
+		modes := []string{"plain", "structured", "rich"}
+		if len(parts) > 1 {
+			arg := strings.ToLower(strings.TrimSpace(parts[1]))
+			valid := false
+			for _, m2 := range modes {
+				if arg == m2 {
+					valid = true
+					break
+				}
+			}
+			if valid {
+				m.tuiState.OutputMode = arg
+				m.saveState()
+				modeDesc := map[string]string{
+					"plain":      "plain prose (default)",
+					"structured": "structured JSON with summary + key points",
+					"rich":       "rich components — chat logs, tables, timelines",
+				}
+				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("output mode → %s  (%s)", arg, modeDesc[arg])})
+			} else {
+				// Cycle through modes if no arg given
+				current := m.tuiState.OutputMode
+				if current == "" {
+					current = "plain"
+				}
+				next := "plain"
+				for i, mo := range modes {
+					if mo == current {
+						next = modes[(i+1)%len(modes)]
+						break
+					}
+				}
+				m.tuiState.OutputMode = next
+				m.saveState()
+				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("output mode → %s", next)})
+			}
+		} else {
+			// No arg: cycle
+			current := m.tuiState.OutputMode
+			if current == "" {
+				current = "plain"
+			}
+			next := "plain"
+			for i, mo := range modes {
+				if mo == current {
+					next = modes[(i+1)%len(modes)]
+					break
+				}
+			}
+			m.tuiState.OutputMode = next
+			m.saveState()
+			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("output mode → %s", next)})
+		}
+
 	case "/window":
 		if len(parts) > 1 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
@@ -2367,7 +2427,7 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 		}
 	}
 
-	prompt := buildPrompt(query, retrievedContext, "")
+	prompt := buildPrompt(query, retrievedContext, "", m.tuiState.OutputMode)
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleUser, Content: prompt},
 	}
@@ -2404,13 +2464,27 @@ func (m *AppModel) addMessage(msg ChatMessage) {
 }
 
 func (m *AppModel) renderStreamingMessage() {
-	if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
-		m.messages[len(m.messages)-1].Content = m.streamBuf.String()
+	content := m.streamBuf.String()
+	// When the LLM is emitting rich JSON, show a placeholder instead of raw JSON.
+	if IsStreamingJSON(content) {
+		placeholder := lipgloss.NewStyle().Foreground(ui.ColorDim).Italic(true).Render("⟳  rendering structured output…")
+		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
+			m.messages[len(m.messages)-1].Content = placeholder
+			m.messages[len(m.messages)-1].Streaming = true
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:      "assistant",
+				Content:   placeholder,
+				Streaming: true,
+			})
+		}
+	} else if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
+		m.messages[len(m.messages)-1].Content = content
 		m.messages[len(m.messages)-1].Streaming = true
 	} else {
 		m.messages = append(m.messages, ChatMessage{
 			Role:      "assistant",
-			Content:   m.streamBuf.String(),
+			Content:   content,
 			Streaming: true,
 		})
 	}
@@ -2620,6 +2694,9 @@ func (m AppModel) renderStatusBar() string {
 	}
 	if m.settings.ThinkingMode {
 		parts = append(parts, ui.ActiveFlagStyle.Render("thinking"))
+	}
+	if m.tuiState.OutputMode != "" && m.tuiState.OutputMode != "plain" {
+		parts = append(parts, ui.ActiveFlagStyle.Render("mode="+m.tuiState.OutputMode))
 	}
 
 	// Busy state indicator.
@@ -2846,6 +2923,10 @@ func (m AppModel) buildHelpContent() string {
 		{"/agent N q", "run agentic query with max N steps"},
 		{"/thinking", "toggle thinking mode"},
 		{"/rag", "toggle RAG-only mode (skip LLM)"},
+		{"/mode", "cycle output mode: plain → structured → rich"},
+		{"/mode plain", "plain prose output (default)"},
+		{"/mode structured", "JSON: summary + key_points"},
+		{"/mode rich", "rich components: chat logs, tables, timelines"},
 		{"/pause", "pause / cancel the current AI operation"},
 		{"/pipeline", "open pipeline management screen"},
 		{"/ingest", "pick a file from raw/ and ingest it"},
@@ -3197,12 +3278,23 @@ func switchChatCmd(bridge *workers.Bridge, slug string) tea.Cmd {
 
 // ─── Prompt building ──────────────────────────────────────────────────────────
 
-func buildPrompt(query, retrievedContext, customTemplate string) string {
+func buildPrompt(query, retrievedContext, customTemplate, outputMode string) string {
 	if customTemplate != "" {
 		result := strings.ReplaceAll(customTemplate, "{query}", query)
 		result = strings.ReplaceAll(result, "{context}", retrievedContext)
 		return result
 	}
+
+	var schemaBlock string
+	switch outputMode {
+	case "rich":
+		schemaBlock = richOutputSchema
+	case "structured":
+		schemaBlock = structuredOutputSchema
+	default:
+		schemaBlock = plainOutputRules
+	}
+
 	return fmt.Sprintf(`You are an expert assistant. Answer the user's question using only the context provided below.
 
 Question:
@@ -3211,14 +3303,7 @@ Question:
 Context chunks:
 %s
 
-Instructions:
-- Provide a clear and concise answer.
-- Use information only from the context.
-- Include references to the chunks where relevant.
-- If the answer is not in the context, say: "The information is not available in the provided context."
-- Maintain clarity and correct pronoun references.
-
-Answer:`, query, retrievedContext)
+%s`, query, retrievedContext, schemaBlock)
 }
 
 func buildAgentSystemPrompt(confident bool, maxSteps, searchesDone int) string {
