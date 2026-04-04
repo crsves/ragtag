@@ -116,6 +116,7 @@ var allCommands = []cmdSuggestion{
 	{"/debug", "toggle debug output", 1},
 	{"/sources", "toggle source table in replies", 2},
 	{"/agent", "toggle / run agentic mode", 3},
+	{"/tools", "show or toggle agent tools", 3},
 	{"/pause", "pause/stop current AI response", 3},
 	{"/update", "update ragtag to the latest version", 3},
 	{"/mode", "set output mode: plain / structured / rich", 4},
@@ -691,6 +692,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Agentic LLM response ───────────────────────────────────────────────
 	case AgentLLMDoneMsg:
+		workers.Logf(m.ragDir, "agent llm done action=%s payload=%q rawChars=%d", msg.Action, msg.Payload, len(msg.Raw))
 		if m.tuiState.Debug && strings.TrimSpace(msg.Raw) != "" {
 			m.addMessage(ChatMessage{
 				Role:        "system",
@@ -711,7 +713,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.agentSearches = append(m.agentSearches, agentQuery)
 			m.addMessage(ChatMessage{Role: "agentic_step", Content: fmt.Sprintf("[SEARCH] %s", agentQuery)})
-			cmds = append(cmds, agentRetrievalCmd(m.bridge, agentQuery, m.settings.FinalK, m.tuiState.Window, m.tuiState.Debug, m.tuiState.MinResults, m.tuiState.ScoreThreshold))
+			cmds = append(cmds, agentRetrievalCmd(m.bridge, agentQuery, m.settings.FinalK, m.agentToolWindow(), m.tuiState.Debug, m.tuiState.MinResults, m.tuiState.ScoreThreshold))
 
 		case "ANSWER":
 			m.appState = StateIdle
@@ -725,6 +727,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Searches:    m.agentSearches,
 				NumSearches: len(m.agentSearches),
 			})
+			if strings.HasPrefix(msg.Payload, "[LLM error:") {
+				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("details logged to %s", filepath.Join(m.ragDir, "ragtag.log"))})
+			}
 			m.resetAgentState()
 
 		default:
@@ -737,11 +742,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Agentic retrieval result ───────────────────────────────────────────
 	case AgentRetrievalDoneMsg:
 		if msg.Err != nil {
+			workers.Logf(m.ragDir, "agent retrieval error query=%q err=%v", msg.Query, msg.Err)
 			m.addMessage(ChatMessage{Role: "error", Content: "Agent retrieval error: " + msg.Err.Error()})
 			m.appState = StateIdle
 			m.resetAgentState()
 			break
 		}
+		workers.Logf(m.ragDir, "agent retrieval query=%q results=%d top=%.3f chunkChars=%d", msg.Query, msg.NumResults, msg.TopScore, len(msg.ChunkText))
 		m.addMessage(ChatMessage{
 			Role:    "agentic_step",
 			Content: fmt.Sprintf("[retrieved %d chunks, top=%.3f]", msg.NumResults, msg.TopScore),
@@ -777,17 +784,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.agentFailed = append(m.agentFailed, msg.Query)
 			m.agentConsecFail++
 			m.agentCtx.WriteString(fmt.Sprintf("\n\n--- '%s' — low confidence, try different angle ---", msg.Query))
+			workers.Logf(m.ragDir, "agent context rejected query=%q consecFail=%d", msg.Query, m.agentConsecFail)
 		} else {
 			m.agentConsecFail = 0
 			m.agentCtx.WriteString(fmt.Sprintf("\n\n--- Results for: '%s' ---\n%s", msg.Query, msg.ChunkText))
+			workers.Logf(m.ragDir, "agent context accepted query=%q contextChars=%d", msg.Query, len(msg.ChunkText))
 		}
 
 		m.agentStep++
 
 		if m.agentConsecFail >= 3 || m.agentStep >= m.agentHardCap() {
+			workers.Logf(m.ragDir, "agent forcing final answer step=%d consecFail=%d hardCap=%d", m.agentStep, m.agentConsecFail, m.agentHardCap())
 			m.addMessage(ChatMessage{Role: "agentic_step", Content: "[forcing final answer…]"})
 			cmds = append(cmds, m.forceAgentAnswerCmd())
 		} else {
+			workers.Logf(m.ragDir, "agent continuing to next step=%d", m.agentStep+1)
 			cmds = append(cmds, m.runAgentStepCmd())
 		}
 
@@ -2028,6 +2039,10 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.tuiState.Debug = !m.tuiState.Debug
 		m.saveState()
 		m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("debug: %v", m.tuiState.Debug)})
+		if m.tuiState.Debug {
+			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("log file: %s", filepath.Join(m.ragDir, "ragtag.log"))})
+		}
+		workers.Logf(m.ragDir, "cmd /debug -> %v", m.tuiState.Debug)
 
 	case "/sources":
 		m.tuiState.ShowSources = !m.tuiState.ShowSources
@@ -2251,6 +2266,7 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		if rest == "" {
 			m.tuiState.AgentMode = !m.tuiState.AgentMode
 			m.saveState()
+			workers.Logf(m.ragDir, "cmd /agent toggle -> %v", m.tuiState.AgentMode)
 			return nil
 		}
 		restParts := strings.Fields(rest)
@@ -2266,6 +2282,40 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 			return m.startAgentFlow(agentQuery, maxSteps)
 		}
 
+	case "/tools":
+		if len(parts) == 1 {
+			m.addMessage(ChatMessage{Role: "system", Content: m.agentToolsSummary()})
+			workers.Logf(m.ragDir, "cmd /tools show")
+			return nil
+		}
+		if len(parts) != 3 {
+			m.addMessage(ChatMessage{Role: "error", Content: "Usage: /tools  OR  /tools <search|context|all> <on|off>"})
+			return nil
+		}
+		target := strings.ToLower(strings.TrimSpace(parts[1]))
+		state := strings.ToLower(strings.TrimSpace(parts[2]))
+		enabled, ok := parseToolState(state)
+		if !ok {
+			m.addMessage(ChatMessage{Role: "error", Content: "Usage: /tools <search|context|all> <on|off>"})
+			return nil
+		}
+		switch target {
+		case "search", "search_rag":
+			m.tuiState.AgentToolSearch = enabled
+		case "context", "expand_context", "window":
+			m.tuiState.AgentToolContext = enabled
+		case "all":
+			m.tuiState.AgentToolSearch = enabled
+			m.tuiState.AgentToolContext = enabled
+		default:
+			m.addMessage(ChatMessage{Role: "error", Content: "Unknown tool. Use search, context, or all."})
+			return nil
+		}
+		m.saveState()
+		m.addMessage(ChatMessage{Role: "system", Content: m.agentToolsSummary()})
+		workers.Logf(m.ragDir, "cmd /tools target=%s enabled=%v", target, enabled)
+		return nil
+
 	case "/clear":
 		m.messages = nil
 		m.renderMessages()
@@ -2274,6 +2324,39 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.addMessage(ChatMessage{Role: "system", Content: "unknown command. type /help for help."})
 	}
 	return nil
+}
+
+func parseToolState(s string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on", "true", "enable", "enabled":
+		return true, true
+	case "off", "false", "disable", "disabled":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func onOffLabel(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
+}
+
+func (m AppModel) agentToolsSummary() string {
+	return fmt.Sprintf(
+		"agent tools\n  search   = %s\n  context  = %s\nusage: /tools <search|context|all> <on|off>",
+		onOffLabel(m.tuiState.AgentToolSearch),
+		onOffLabel(m.tuiState.AgentToolContext),
+	)
+}
+
+func (m AppModel) agentToolWindow() int {
+	if m.tuiState.AgentToolContext {
+		return m.tuiState.Window
+	}
+	return 0
 }
 
 // ─── Flow starters ────────────────────────────────────────────────────────────
@@ -2320,6 +2403,12 @@ func (m *AppModel) startRetrievalFlow(query string) []tea.Cmd {
 func (m *AppModel) startAgentFlow(question string, maxSteps int) []tea.Cmd {
 	if !m.bridgeReady {
 		m.addMessage(ChatMessage{Role: "error", Content: "Retriever not ready yet. Please wait."})
+		workers.Logf(m.ragDir, "agent start blocked: bridge not ready question=%q", question)
+		return nil
+	}
+	if !m.tuiState.AgentToolSearch {
+		m.addMessage(ChatMessage{Role: "error", Content: "agent search tool is off. use /tools search on"})
+		workers.Logf(m.ragDir, "agent start blocked: search tool disabled question=%q", question)
 		return nil
 	}
 	m.appState = StateAgentStep
@@ -2337,6 +2426,17 @@ func (m *AppModel) startAgentFlow(question string, maxSteps int) []tea.Cmd {
 	}
 	m.addMessage(ChatMessage{Role: "user", Content: question})
 	m.addMessage(ChatMessage{Role: "agentic_step", Content: fmt.Sprintf("[agentic mode · %s]", label)})
+	workers.Logf(
+		m.ragDir,
+		"agent start question=%q maxSteps=%d tools={search:%v context:%v} window=%d debug=%v model=%s",
+		question,
+		maxSteps,
+		m.tuiState.AgentToolSearch,
+		m.tuiState.AgentToolContext,
+		m.agentToolWindow(),
+		m.tuiState.Debug,
+		m.settings.NIMModel,
+	)
 
 	return []tea.Cmd{m.spinner.Tick, m.runAgentStepCmd()}
 }
@@ -2364,7 +2464,9 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 	accumulated := m.agentCtx.String()
 	maxSteps := m.agentMaxSteps
 	confident := m.tuiState.Confident
+	contextEnabled := m.tuiState.AgentToolContext
 	cfg := m.settings.ToLLMConfig()
+	cfg.LogDir = m.ragDir
 
 	return func() (msg tea.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -2375,7 +2477,7 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 				msg = AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[agent panic: %v]", r)}
 			}
 		}()
-		system := buildAgentSystemPrompt(confident, maxSteps, len(searches))
+		system := buildAgentSystemPrompt(confident, maxSteps, len(searches), contextEnabled)
 
 		var remaining string
 		if maxSteps > 0 {
@@ -2392,6 +2494,15 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 		prompt := fmt.Sprintf(
 			"Question: %s\n\nSearches done: %v\nLow-quality searches (avoid similar): %v\n%s\n\nIMPORTANT: Do NOT append words to previous queries. Think of a completely new angle.\nContext retrieved so far:\n%s\n\nWhat do you do next? Reply with exactly one SEARCH: ... line or one ANSWER: ... response.",
 			question, searches, failed, remaining, ctxText,
+		)
+		workers.Logf(
+			m.ragDir,
+			"agent llm request step=%d searches=%d failed=%d contextChars=%d tools={context:%v}",
+			len(searches)+1,
+			len(searches),
+			len(failed),
+			len(ctxText),
+			contextEnabled,
 		)
 
 		messages := []openai.ChatCompletionMessage{
@@ -2414,6 +2525,7 @@ func (m *AppModel) forceAgentAnswerCmd() tea.Cmd {
 	accumulated := m.agentCtx.String()
 	numSearches := len(m.agentSearches)
 	cfg := m.settings.ToLLMConfig()
+	cfg.LogDir = m.ragDir
 
 	return func() tea.Msg {
 		llmCtx, llmCancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -2430,6 +2542,7 @@ func (m *AppModel) forceAgentAnswerCmd() tea.Cmd {
 		messages := []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleUser, Content: prompt},
 		}
+		workers.Logf(m.ragDir, "agent forced answer request searches=%d contextChars=%d", numSearches, len(ctxText))
 
 		resp, err := workers.CallLLM(llmCtx, cfg, messages)
 		if err != nil {
@@ -2608,6 +2721,15 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 	}
 
 	cfg := m.settings.ToLLMConfig()
+	cfg.LogDir = m.ragDir
+	workers.Logf(
+		m.ragDir,
+		"streaming llm request query=%q contextChars=%d mode=%s model=%s",
+		query,
+		len(retrievedContext),
+		m.tuiState.OutputMode,
+		m.settings.NIMModel,
+	)
 	// Create fresh channels for this streaming session to avoid
 	// "close of closed channel" panics when a previous session's channel
 	// was already closed by StreamLLM on error or EOF.
@@ -3133,6 +3255,9 @@ func (m AppModel) buildHelpContent() string {
 		{"/model", "open interactive model picker"},
 		{"/agent", "toggle agentic mode"},
 		{"/agent N q", "run agentic query with max N steps"},
+		{"/tools", "show agent tool toggles"},
+		{"/tools search off", "disable agent SEARCH retrieval"},
+		{"/tools context off", "disable context-window expansion"},
 		{"/thinking", "toggle thinking mode"},
 		{"/rag", "toggle RAG-only mode (skip LLM)"},
 		{"/mode", "cycle output mode: plain → structured → rich"},
@@ -3537,7 +3662,7 @@ Context chunks:
 %s`, query, retrievedContext, schemaBlock)
 }
 
-func buildAgentSystemPrompt(confident bool, maxSteps, searchesDone int) string {
+func buildAgentSystemPrompt(confident bool, maxSteps, searchesDone int, contextEnabled bool) string {
 	var budgetLine string
 	switch {
 	case confident:
@@ -3549,9 +3674,15 @@ func buildAgentSystemPrompt(confident bool, maxSteps, searchesDone int) string {
 		budgetLine = "You have no hard step limit, but be efficient. Only issue another SEARCH if you genuinely need more information; otherwise emit ANSWER to avoid wasting queries."
 	}
 
+	contextLine := "You will receive matched chunks plus surrounding context-window messages."
+	if !contextEnabled {
+		contextLine = "Surrounding context windows are disabled. You will only receive the matched chunk text."
+	}
+
 	return fmt.Sprintf(`You are querying a semantic search index built from Discord chat logs between two people: 'peepee' (Devin) and 'sania'.
 SEARCH queries use semantic similarity — short, natural phrases (3-6 words) work best.
 Each SEARCH returns the most relevant chat message chunks from the logs.
+%s
 
 Rules:
 - Output exactly one line starting with SEARCH: <query> to retrieve chunks from the chat log
@@ -3565,7 +3696,7 @@ Rules:
 - If you've done 3+ searches with no good results, just ANSWER with what you found
 - After 3-4 searches with no useful results, give your best ANSWER based on what was found
 - Do NOT keep searching if you already have enough context to answer
-- Do NOT output JSON, markdown, code fences, bullets, or explanations before SEARCH:/ANSWER:`, budgetLine)
+- Do NOT output JSON, markdown, code fences, bullets, or explanations before SEARCH:/ANSWER:`, contextLine, budgetLine)
 }
 
 // parseAgentResponse scans the LLM response for the first SEARCH: or ANSWER:

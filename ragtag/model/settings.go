@@ -180,20 +180,26 @@ func parseInt(text, key string) (int, bool) {
 
 // TUIState holds ephemeral UI preferences persisted to .tui_state.json.
 type TUIState struct {
-	Debug          bool    `json:"debug"`
-	ShowSources    bool    `json:"show_sources"`
-	Window         int     `json:"window"`
-	Confident      bool    `json:"confident"`
-	AgentMode      bool    `json:"agent_mode"`
-	RAGOnly        bool    `json:"rag_only"`
-	MinResults     int     `json:"min_results"`     // adaptive retrieval floor
-	ScoreThreshold float64 `json:"score_threshold"` // rerank score cutoff (0 = disabled)
-	OutputMode     string  `json:"output_mode"`     // "plain" | "structured" | "rich"
+	Debug            bool    `json:"debug"`
+	ShowSources      bool    `json:"show_sources"`
+	Window           int     `json:"window"`
+	Confident        bool    `json:"confident"`
+	AgentMode        bool    `json:"agent_mode"`
+	AgentToolSearch  bool    `json:"agent_tool_search"`
+	AgentToolContext bool    `json:"agent_tool_context"`
+	RAGOnly          bool    `json:"rag_only"`
+	MinResults       int     `json:"min_results"`     // adaptive retrieval floor
+	ScoreThreshold   float64 `json:"score_threshold"` // rerank score cutoff (0 = disabled)
+	OutputMode       string  `json:"output_mode"`     // "plain" | "structured" | "rich"
 }
 
 // LoadTUIState reads the JSON state file. Returns sensible defaults on any error.
 func LoadTUIState(path string) TUIState {
-	s := TUIState{Window: 5}
+	s := TUIState{
+		Window:           5,
+		AgentToolSearch:  true,
+		AgentToolContext: true,
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return s

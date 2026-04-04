@@ -17,6 +17,7 @@ type LLMConfig struct {
 	TopP         float32
 	MaxTokens    int
 	ThinkingMode bool
+	LogDir       string
 }
 
 // newClient creates an OpenAI client configured for the given LLMConfig.
@@ -43,6 +44,7 @@ func extraBody(cfg LLMConfig) map[string]interface{} {
 // sends to errCh (nil on success). The caller must drain tokenCh.
 func StreamLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatCompletionMessage, tokenCh chan<- string, errCh chan<- error) {
 	client := newClient(cfg)
+	Logf(cfg.LogDir, "stream llm start model=%s messages=%d summary=%s", cfg.Model, len(messages), summarizeMessages(messages))
 
 	req := openai.ChatCompletionRequest{
 		Model:       cfg.Model,
@@ -63,6 +65,7 @@ func StreamLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatComplet
 
 	stream, err := client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
+		Logf(cfg.LogDir, "stream llm create error: %v", err)
 		close(tokenCh)
 		errCh <- fmt.Errorf("create stream: %w", err)
 		return
@@ -74,8 +77,10 @@ func StreamLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatComplet
 		if err != nil {
 			close(tokenCh)
 			if err.Error() == "EOF" || strings.Contains(err.Error(), "EOF") {
+				Logf(cfg.LogDir, "stream llm done: eof")
 				errCh <- nil
 			} else {
+				Logf(cfg.LogDir, "stream llm recv error: %v", err)
 				errCh <- fmt.Errorf("stream recv: %w", err)
 			}
 			return
@@ -98,6 +103,7 @@ func StreamLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatComplet
 // CallLLM performs a non-streaming chat completion and returns the full response.
 func CallLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatCompletionMessage) (string, error) {
 	client := newClient(cfg)
+	Logf(cfg.LogDir, "call llm start model=%s messages=%d summary=%s", cfg.Model, len(messages), summarizeMessages(messages))
 
 	req := openai.ChatCompletionRequest{
 		Model:       cfg.Model,
@@ -110,12 +116,15 @@ func CallLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatCompletio
 
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
+		Logf(cfg.LogDir, "call llm error: %v", err)
 		return "", fmt.Errorf("chat completion: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
+		Logf(cfg.LogDir, "call llm empty choices id=%s usage=%+v raw=%+v", resp.ID, resp.Usage, resp)
 		return "", fmt.Errorf("no choices in response")
 	}
-
-	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	content := strings.TrimSpace(resp.Choices[0].Message.Content)
+	Logf(cfg.LogDir, "call llm success id=%s choices=%d finish=%s content=%q", resp.ID, len(resp.Choices), resp.Choices[0].FinishReason, clipLog(content, 400))
+	return content, nil
 }

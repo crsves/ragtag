@@ -144,6 +144,7 @@ type Bridge struct {
 // {"ready": true} handshake completes or the 30-second timeout fires.
 func NewBridge(ragDir string) (*Bridge, error) {
 	var cmd *exec.Cmd
+	Logf(ragDir, "bridge start requested ragDir=%s", ragDir)
 	bridgeExecName := "bridge"
 	if runtime.GOOS == "windows" {
 		bridgeExecName = "bridge.exe"
@@ -162,6 +163,7 @@ func NewBridge(ragDir string) (*Bridge, error) {
 			"HF_TOKEN="+token,
 			"HUGGINGFACE_HUB_TOKEN="+token,
 		)
+		Logf(ragDir, "bridge env: HF token configured")
 	}
 	// Redirect bridge stderr to a log file for debugging; use io.Discard fallback.
 	logPath := filepath.Join(ragDir, "bridge_stderr.log")
@@ -183,6 +185,7 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		Logf(ragDir, "bridge start error: %v", err)
 		return nil, fmt.Errorf("bridge start: %w", err)
 	}
 
@@ -218,8 +221,10 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	// Block until ready or timeout.
 	select {
 	case <-b.readyCh:
+		Logf(ragDir, "bridge ready")
 		// good
 	case <-time.After(30 * time.Second):
+		Logf(ragDir, "bridge ready timeout after 30s")
 		killProc(cmd)
 		return nil, fmt.Errorf("bridge did not become ready within 30 s")
 	}
@@ -249,13 +254,16 @@ func (b *Bridge) Kill() {
 func (b *Bridge) sendRaw(req bridgeRequest) ([]byte, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	Logf(b.ragDir, "bridge send cmd=%s query=%q k=%d window=%d debug=%v slug=%q file=%q", req.Cmd, clipLog(req.Query, 160), req.K, req.Window, req.Debug, req.Slug, req.File)
 
 	data, err := json.Marshal(req)
 	if err != nil {
+		Logf(b.ragDir, "bridge marshal error cmd=%s err=%v", req.Cmd, err)
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
 	if _, err := fmt.Fprintf(b.stdin, "%s\n", data); err != nil {
+		Logf(b.ragDir, "bridge write error cmd=%s err=%v", req.Cmd, err)
 		return nil, fmt.Errorf("write to bridge: %w", err)
 	}
 
@@ -263,12 +271,15 @@ func (b *Bridge) sendRaw(req bridgeRequest) ([]byte, error) {
 	for b.stdout.Scan() {
 		line := b.stdout.Text()
 		if len(line) > 0 && line[0] == '{' {
+			Logf(b.ragDir, "bridge recv cmd=%s bytes=%d", req.Cmd, len(line))
 			return []byte(line), nil
 		}
 	}
 	if err := b.stdout.Err(); err != nil {
+		Logf(b.ragDir, "bridge read error cmd=%s err=%v", req.Cmd, err)
 		return nil, fmt.Errorf("read bridge response: %w", err)
 	}
+	Logf(b.ragDir, "bridge stdout closed unexpectedly cmd=%s", req.Cmd)
 	return nil, fmt.Errorf("bridge stdout closed unexpectedly")
 }
 
@@ -302,11 +313,14 @@ func (b *Bridge) Retrieve(query string, k, window int, debug bool, minResults in
 		ScoreThreshold: scoreThreshold,
 	})
 	if err != nil {
+		Logf(b.ragDir, "retrieve error query=%q err=%v", clipLog(query, 160), err)
 		return nil, "", nil, err
 	}
 	if resp.Error != "" {
+		Logf(b.ragDir, "retrieve bridge error query=%q err=%s", clipLog(query, 160), resp.Error)
 		return nil, "", nil, fmt.Errorf("bridge error: %s", resp.Error)
 	}
+	Logf(b.ragDir, "retrieve success query=%q results=%d contextChars=%d", clipLog(query, 160), len(resp.Results), len(resp.Context))
 	return resp.Results, resp.Context, resp.DebugStats, nil
 }
 
