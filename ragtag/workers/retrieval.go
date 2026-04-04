@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,6 +48,18 @@ func findProjectPython(ragDir string) string {
 	return findPython()
 }
 
+func loadHFToken(ragDir string) string {
+	data, err := os.ReadFile(filepath.Join(ragDir, "nim_config.py"))
+	if err != nil {
+		return ""
+	}
+	re := regexp.MustCompile(`(?m)^HF_TOKEN\s*=\s*["'](.*?)["']`)
+	if m := re.FindStringSubmatch(string(data)); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+
 // Chunk represents a retrieved text chunk.
 type Chunk struct {
 	ChunkID        string `json:"chunk_id"`
@@ -75,16 +89,16 @@ type ViewerMessage struct {
 
 // DebugStats holds retrieval pipeline diagnostics from the Python bridge.
 type DebugStats struct {
-QueryType       string `json:"query_type"`
-FaissK          int    `json:"faiss_k"`
-BM25K           int    `json:"bm25_k"`
-FaissHits       int    `json:"faiss_hits"`
-BM25Hits        int    `json:"bm25_hits"`
-MergedPool      int    `json:"merged_pool"`
-BM25Unique      int    `json:"bm25_unique"`
-NeighborsAdded  int    `json:"neighbors_added"`
-TotalCandidates int    `json:"total_candidates"`
-Reranked        int    `json:"reranked"`
+	QueryType       string `json:"query_type"`
+	FaissK          int    `json:"faiss_k"`
+	BM25K           int    `json:"bm25_k"`
+	FaissHits       int    `json:"faiss_hits"`
+	BM25Hits        int    `json:"bm25_hits"`
+	MergedPool      int    `json:"merged_pool"`
+	BM25Unique      int    `json:"bm25_unique"`
+	NeighborsAdded  int    `json:"neighbors_added"`
+	TotalCandidates int    `json:"total_candidates"`
+	Reranked        int    `json:"reranked"`
 }
 
 // bridgeRequest is the JSON sent to the bridge subprocess.
@@ -142,6 +156,13 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		cmd = exec.Command(py, "bridge.py")
 	}
 	cmd.Dir = ragDir
+	cmd.Env = os.Environ()
+	if token := loadHFToken(ragDir); token != "" {
+		cmd.Env = append(cmd.Env,
+			"HF_TOKEN="+token,
+			"HUGGINGFACE_HUB_TOKEN="+token,
+		)
+	}
 	// Redirect bridge stderr to a log file for debugging; use io.Discard fallback.
 	logPath := filepath.Join(ragDir, "bridge_stderr.log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {

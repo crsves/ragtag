@@ -15,6 +15,7 @@ import (
 type Settings struct {
 	NIMAPIKey       string
 	NIMBaseURL      string
+	HFToken         string
 	NIMModel        string
 	Temperature     float64
 	TopP            float64
@@ -29,6 +30,7 @@ type Settings struct {
 var defaults = Settings{
 	NIMAPIKey:       "",
 	NIMBaseURL:      "https://integrate.api.nvidia.com/v1",
+	HFToken:         "",
 	NIMModel:        "meta/llama-3.3-70b-instruct",
 	Temperature:     0.2,
 	TopP:            0.7,
@@ -61,6 +63,9 @@ func LoadSettings(nimConfigPath string) (*Settings, error) {
 	}
 	if v := parseString(text, "NIM_BASE_URL"); v != "" {
 		s.NIMBaseURL = v
+	}
+	if v := parseString(text, "HF_TOKEN"); v != "" {
+		s.HFToken = v
 	}
 	if v := parseString(text, "NIM_MODEL"); v != "" {
 		s.NIMModel = v
@@ -105,6 +110,7 @@ func (s *Settings) Save() error {
 		"# NIM API configuration — gitignored, do not commit",
 		fmt.Sprintf(`NIM_API_KEY = "%s"`, s.NIMAPIKey),
 		fmt.Sprintf(`NIM_BASE_URL = "%s"`, s.NIMBaseURL),
+		fmt.Sprintf(`HF_TOKEN = "%s"`, s.HFToken),
 		fmt.Sprintf(`NIM_MODEL = "%s"`, s.NIMModel),
 		"",
 		"# Generation settings — low temperature keeps RAG answers factual",
@@ -180,9 +186,9 @@ type TUIState struct {
 	Confident      bool    `json:"confident"`
 	AgentMode      bool    `json:"agent_mode"`
 	RAGOnly        bool    `json:"rag_only"`
-	MinResults     int     `json:"min_results"`      // adaptive retrieval floor
-	ScoreThreshold float64 `json:"score_threshold"`  // rerank score cutoff (0 = disabled)
-	OutputMode     string  `json:"output_mode"`      // "plain" | "structured" | "rich"
+	MinResults     int     `json:"min_results"`     // adaptive retrieval floor
+	ScoreThreshold float64 `json:"score_threshold"` // rerank score cutoff (0 = disabled)
+	OutputMode     string  `json:"output_mode"`     // "plain" | "structured" | "rich"
 }
 
 // LoadTUIState reads the JSON state file. Returns sensible defaults on any error.

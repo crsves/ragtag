@@ -51,6 +51,7 @@ type StreamDoneMsg struct{ Err error }
 type AgentLLMDoneMsg struct {
 	Action  string // "SEARCH" or "ANSWER"
 	Payload string
+	Raw     string
 }
 
 // AgentRetrievalDoneMsg carries retrieval results for one agentic search step.
@@ -155,18 +156,18 @@ var allModels = []string{
 
 // defaultNicknames provides built-in short aliases for common models.
 var defaultNicknames = map[string]string{
-	"deepseek":  "deepseek-ai/deepseek-v3.2",
-	"gpt":       "openai/gpt-oss-120b",
-	"gpt120":    "openai/gpt-oss-120b",
-	"llama":     "meta/llama-3.3-70b-instruct",
-	"llama70":   "meta/llama-3.3-70b-instruct",
-	"llama8":    "meta/llama-3.1-8b-instruct",
-	"llama3b":   "meta/llama-3.2-3b-instruct",
-	"nemotron":  "nvidia/llama-3.1-nemotron-70b-instruct",
-	"mistral":   "mistralai/mistral-7b-instruct-v0.3",
-	"mixtral":   "mistralai/mixtral-8x7b-instruct-v0.1",
-	"gemma":     "google/gemma-2-9b-it",
-	"phi":       "microsoft/phi-3-mini-128k-instruct",
+	"deepseek": "deepseek-ai/deepseek-v3.2",
+	"gpt":      "openai/gpt-oss-120b",
+	"gpt120":   "openai/gpt-oss-120b",
+	"llama":    "meta/llama-3.3-70b-instruct",
+	"llama70":  "meta/llama-3.3-70b-instruct",
+	"llama8":   "meta/llama-3.1-8b-instruct",
+	"llama3b":  "meta/llama-3.2-3b-instruct",
+	"nemotron": "nvidia/llama-3.1-nemotron-70b-instruct",
+	"mistral":  "mistralai/mistral-7b-instruct-v0.3",
+	"mixtral":  "mistralai/mixtral-8x7b-instruct-v0.1",
+	"gemma":    "google/gemma-2-9b-it",
+	"phi":      "microsoft/phi-3-mini-128k-instruct",
 }
 
 // settingsRows defines the ordered fields in the Model settings screen.
@@ -189,6 +190,7 @@ var apiSettingsRows = []struct {
 }{
 	{"api_key", "API Key"},
 	{"base_url", "Base URL"},
+	{"hf_token", "HF Token"},
 }
 
 // retrievalSettingsRows defines the fields in the Retrieval settings screen.
@@ -280,7 +282,7 @@ type AppModel struct {
 	// Agentic state
 	agentSearches   []string
 	agentFailed     []string
-	agentCtx        bytes.Buffer    // accumulated retrieved context (not the Go context.Context)
+	agentCtx        bytes.Buffer // accumulated retrieved context (not the Go context.Context)
 	agentStep       int
 	agentMaxSteps   int // -1 = use default cap
 	agentQuestion   string
@@ -305,8 +307,8 @@ type AppModel struct {
 	clarify ClarifyState
 
 	// Update notification
-	updateAvailable string // non-empty when a newer version exists
-	updateChangelog  string
+	updateAvailable    string // non-empty when a newer version exists
+	updateChangelog    string
 	startupUpdateShown bool // true once the startup update clarify has been shown
 
 	// Autocomplete
@@ -342,11 +344,11 @@ type AppModel struct {
 	pipelineFileCursor  int    // cursor within file picker list
 
 	// Chat file viewer
-	chatFileList      []string
-	chatFileCursor    int
-	chatViewVP        viewport.Model
-	chatViewTitle     string
-	chatViewContent   string // rendered content stored for search
+	chatFileList       []string
+	chatFileCursor     int
+	chatViewVP         viewport.Model
+	chatViewTitle      string
+	chatViewContent    string // rendered content stored for search
 	chatViewSearchMode bool
 	chatViewSearchTerm string
 	chatViewMatchLines []int
@@ -365,7 +367,7 @@ type AppModel struct {
 	nicknamePath   string
 
 	// Nickname editor
-	nickStep     int    // 0 = pick model, 1 = type name
+	nickStep     int // 0 = pick model, 1 = type name
 	nickModelIdx int
 	nickInput    string
 
@@ -373,10 +375,10 @@ type AppModel struct {
 	animFrame int
 
 	// RAG-only chunk browser
-	ragBrowseChunks []workers.Result
-	ragBrowseCursor int
-	ragBrowseVP     viewport.Model
-	ragBrowseCtxVP  viewport.Model
+	ragBrowseChunks  []workers.Result
+	ragBrowseCursor  int
+	ragBrowseVP      viewport.Model
+	ragBrowseCtxVP   viewport.Model
 	ragBrowseCtxOpen bool
 }
 
@@ -612,7 +614,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if limit > 0 {
 				var rb strings.Builder
 				rb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s  %s", "#", "score", "★", "src", "timestamp", "text")) + "\n")
-				rb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
+				rb.WriteString(dimStyle.Render("  "+strings.Repeat("─", 80)) + "\n")
 				for i, r := range msg.Results[:limit] {
 					score := r.RerankScore
 					if score == 0 {
@@ -689,6 +691,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Agentic LLM response ───────────────────────────────────────────────
 	case AgentLLMDoneMsg:
+		if m.tuiState.Debug && strings.TrimSpace(msg.Raw) != "" {
+			m.addMessage(ChatMessage{
+				Role:        "system",
+				Content:     "debug · agent llm\n" + renderCodeBlockCard("text", strings.TrimSpace(msg.Raw), max(50, m.width-4)),
+				Prerendered: true,
+			})
+		}
 		switch strings.ToUpper(msg.Action) {
 		case "SEARCH":
 			agentQuery := msg.Payload
@@ -753,7 +762,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addMessage(ChatMessage{Role: "system", Content: "debug · agent retrieval stats\n" + sb.String(), Prerendered: true})
 		}
 
-		if msg.NumResults == 0 || msg.TopScore < 0.5 {
+		usefulResults := msg.NumResults > 0 && strings.TrimSpace(msg.ChunkText) != ""
+		if m.tuiState.Debug {
+			state := "accepted"
+			if !usefulResults {
+				state = "rejected"
+			}
+			m.addMessage(ChatMessage{
+				Role:    "system",
+				Content: fmt.Sprintf("debug · agent context %s (results=%d top=%.3f)", state, msg.NumResults, msg.TopScore),
+			})
+		}
+		if !usefulResults {
 			m.agentFailed = append(m.agentFailed, msg.Query)
 			m.agentConsecFail++
 			m.agentCtx.WriteString(fmt.Sprintf("\n\n--- '%s' — low confidence, try different angle ---", msg.Query))
@@ -822,14 +842,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addMessage(ChatMessage{Role: "error", Content: "Check error: " + msg.Err.Error()})
 		} else {
 			accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-			dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
-			valStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
-			warnStyle   := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+			dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+			valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+			warnStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
 
-			latest, _      := msg.Data["latest"].(string)
+			latest, _ := msg.Data["latest"].(string)
 			exportAfter, _ := msg.Data["export_after"].(string)
-			hoursF, _      := msg.Data["hours_behind"].(float64)
-			hours          := int(hoursF)
+			hoursF, _ := msg.Data["hours_behind"].(float64)
+			hours := int(hoursF)
 
 			var sb strings.Builder
 			if latest == "" {
@@ -864,7 +884,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Question: "ragtag updated successfully! Restart now to use the new version?",
 				Options: []ClarifyOption{
 					{ID: "yes", Label: "Restart now"},
-					{ID: "no",  Label: "Later"},
+					{ID: "no", Label: "Later"},
 				},
 				Cursor:           0,
 				SuggestedDefault: "yes",
@@ -885,12 +905,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					question = fmt.Sprintf("ragtag %s is available — %s. Update now?", msg.Latest, msg.Changelog)
 				}
 				m.clarify = ClarifyState{
-					Active:           true,
-					Kind:             ClarifyKindUpdate,
-					Question:         question,
+					Active:   true,
+					Kind:     ClarifyKindUpdate,
+					Question: question,
 					Options: []ClarifyOption{
 						{ID: "yes", Label: "Update now  (/update)"},
-						{ID: "no",  Label: "Later"},
+						{ID: "no", Label: "Later"},
 					},
 					Cursor:           0,
 					SuggestedDefault: "yes",
@@ -1066,244 +1086,245 @@ func (m *AppModel) handleChatKey(msg tea.KeyMsg) []tea.Cmd {
 	return cmds
 }
 
-
 // ─── Settings menu ────────────────────────────────────────────────────────────
 
 func (m *AppModel) handleSettingsMenuKey(msg tea.KeyMsg) []tea.Cmd {
-        m.acConsumedKey = true
-        switch msg.Type {
-        case tea.KeyEsc:
-                m.screen = ScreenChat
-        case tea.KeyUp:
-                if m.settingsMenuCursor > 0 {
-                        m.settingsMenuCursor--
-                }
-        case tea.KeyDown:
-                if m.settingsMenuCursor < len(settingsMenuItems)-1 {
-                        m.settingsMenuCursor++
-                }
-        case tea.KeyEnter:
-                item := settingsMenuItems[m.settingsMenuCursor]
-                if item.action == "stats" {
-                        m.screen = ScreenChat
-                        return []tea.Cmd{fetchStatsCmd(m.bridge)}
-                }
-                if item.screen == ScreenChatList {
-                        m.screen = ScreenChatList
-                        m.chatFileCursor = 0
-                        return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
-                }
-                m.screen = item.screen
-                m.settingsCursor = 0
-                m.retrievalSettingsCursor = 0
-        }
-        return nil
+	m.acConsumedKey = true
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenChat
+	case tea.KeyUp:
+		if m.settingsMenuCursor > 0 {
+			m.settingsMenuCursor--
+		}
+	case tea.KeyDown:
+		if m.settingsMenuCursor < len(settingsMenuItems)-1 {
+			m.settingsMenuCursor++
+		}
+	case tea.KeyEnter:
+		item := settingsMenuItems[m.settingsMenuCursor]
+		if item.action == "stats" {
+			m.screen = ScreenChat
+			return []tea.Cmd{fetchStatsCmd(m.bridge)}
+		}
+		if item.screen == ScreenChatList {
+			m.screen = ScreenChatList
+			m.chatFileCursor = 0
+			return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
+		}
+		m.screen = item.screen
+		m.settingsCursor = 0
+		m.retrievalSettingsCursor = 0
+	}
+	return nil
 }
 
 func (m AppModel) viewSettingsMenuContent() string {
-        var sb strings.Builder
-        sb.WriteString(ui.TitleStyle.Render("Settings") + "\n\n")
-        for i, item := range settingsMenuItems {
-                isCursor := i == m.settingsMenuCursor
-                marker := "  "
-                label := item.label
-                if isCursor {
-                        marker = ui.ActiveFlagStyle.Render("▶ ")
-                        label = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(label)
-                } else {
-                        label = ui.SystemMsgStyle.Render(label)
-                }
-                sb.WriteString(fmt.Sprintf("%s%s\n", marker, label))
-        }
-        sb.WriteString("\n")
-        sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: open · ESC: back"))
-        return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
-                ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
-        )
+	var sb strings.Builder
+	sb.WriteString(ui.TitleStyle.Render("Settings") + "\n\n")
+	for i, item := range settingsMenuItems {
+		isCursor := i == m.settingsMenuCursor
+		marker := "  "
+		label := item.label
+		if isCursor {
+			marker = ui.ActiveFlagStyle.Render("▶ ")
+			label = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(label)
+		} else {
+			label = ui.SystemMsgStyle.Render(label)
+		}
+		sb.WriteString(fmt.Sprintf("%s%s\n", marker, label))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: open · ESC: back"))
+	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
+		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
+	)
 }
 
 // ─── Retrieval settings ───────────────────────────────────────────────────────
 
 func (m *AppModel) handleRetrievalSettingsKey(msg tea.KeyMsg) []tea.Cmd {
-        m.acConsumedKey = true
-        if m.retrievalEditing != "" {
-                switch msg.Type {
-                case tea.KeyEsc:
-                        m.retrievalEditing = ""
-                        m.retrievalInput = ""
-                case tea.KeyEnter:
-                        m.applyRetrievalEdit()
-                        m.retrievalEditing = ""
-                        m.retrievalInput = ""
-                case tea.KeyBackspace, tea.KeyDelete:
-                        if len(m.retrievalInput) > 0 {
-                                runes := []rune(m.retrievalInput)
-                                m.retrievalInput = string(runes[:len(runes)-1])
-                        }
-                default:
-                        if msg.Type == tea.KeyRunes {
-                                m.retrievalInput += msg.String()
-                        }
-                }
-                return nil
-        }
-        switch msg.Type {
-        case tea.KeyEsc:
-                m.screen = ScreenSettingsMenu
-                m.retrievalSettingsCursor = 0
-        case tea.KeyUp:
-                if m.retrievalSettingsCursor > 0 {
-                        m.retrievalSettingsCursor--
-                }
-        case tea.KeyDown:
-                if m.retrievalSettingsCursor < len(retrievalSettingsRows)-1 {
-                        m.retrievalSettingsCursor++
-                }
-        case tea.KeyEnter:
-                row := retrievalSettingsRows[m.retrievalSettingsCursor]
-                m.retrievalEditing = row.key
-                switch row.key {
-                case "final_k":
-                        m.retrievalInput = strconv.Itoa(m.settings.FinalK)
-                case "window":
-                        m.retrievalInput = strconv.Itoa(m.tuiState.Window)
-                case "min_results":
-                        m.retrievalInput = strconv.Itoa(m.tuiState.MinResults)
-                case "score_threshold":
-                        m.retrievalInput = fmt.Sprintf("%.3f", m.tuiState.ScoreThreshold)
-                case "max_context_chars":
-                        m.retrievalInput = strconv.Itoa(m.settings.MaxContextChars)
-                }
-        }
-        return nil
+	m.acConsumedKey = true
+	if m.retrievalEditing != "" {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.retrievalEditing = ""
+			m.retrievalInput = ""
+		case tea.KeyEnter:
+			m.applyRetrievalEdit()
+			m.retrievalEditing = ""
+			m.retrievalInput = ""
+		case tea.KeyBackspace, tea.KeyDelete:
+			if len(m.retrievalInput) > 0 {
+				runes := []rune(m.retrievalInput)
+				m.retrievalInput = string(runes[:len(runes)-1])
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.retrievalInput += msg.String()
+			}
+		}
+		return nil
+	}
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenSettingsMenu
+		m.retrievalSettingsCursor = 0
+	case tea.KeyUp:
+		if m.retrievalSettingsCursor > 0 {
+			m.retrievalSettingsCursor--
+		}
+	case tea.KeyDown:
+		if m.retrievalSettingsCursor < len(retrievalSettingsRows)-1 {
+			m.retrievalSettingsCursor++
+		}
+	case tea.KeyEnter:
+		row := retrievalSettingsRows[m.retrievalSettingsCursor]
+		m.retrievalEditing = row.key
+		switch row.key {
+		case "final_k":
+			m.retrievalInput = strconv.Itoa(m.settings.FinalK)
+		case "window":
+			m.retrievalInput = strconv.Itoa(m.tuiState.Window)
+		case "min_results":
+			m.retrievalInput = strconv.Itoa(m.tuiState.MinResults)
+		case "score_threshold":
+			m.retrievalInput = fmt.Sprintf("%.3f", m.tuiState.ScoreThreshold)
+		case "max_context_chars":
+			m.retrievalInput = strconv.Itoa(m.settings.MaxContextChars)
+		}
+	}
+	return nil
 }
 
 func (m *AppModel) applyRetrievalEdit() {
-        switch m.retrievalEditing {
-        case "final_k":
-                if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v > 0 {
-                        m.settings.FinalK = v
-                        _ = m.settings.Save()
-                }
-        case "window":
-                if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v >= 0 {
-                        m.tuiState.Window = v
-                        _ = SaveTUIState(filepath.Join(m.ragDir, ".tui_state.json"), m.tuiState)
-                }
-        case "min_results":
-                if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v >= 0 {
-                        m.tuiState.MinResults = v
-                        m.saveState()
-                }
-        case "score_threshold":
-                if v, err := strconv.ParseFloat(strings.TrimSpace(m.retrievalInput), 64); err == nil && v >= 0 {
-                        m.tuiState.ScoreThreshold = v
-                        m.saveState()
-                }
-        case "max_context_chars":
-                if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v > 0 {
-                        m.settings.MaxContextChars = v
-                        _ = m.settings.Save()
-                }
-        }
+	switch m.retrievalEditing {
+	case "final_k":
+		if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v > 0 {
+			m.settings.FinalK = v
+			_ = m.settings.Save()
+		}
+	case "window":
+		if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v >= 0 {
+			m.tuiState.Window = v
+			_ = SaveTUIState(filepath.Join(m.ragDir, ".tui_state.json"), m.tuiState)
+		}
+	case "min_results":
+		if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v >= 0 {
+			m.tuiState.MinResults = v
+			m.saveState()
+		}
+	case "score_threshold":
+		if v, err := strconv.ParseFloat(strings.TrimSpace(m.retrievalInput), 64); err == nil && v >= 0 {
+			m.tuiState.ScoreThreshold = v
+			m.saveState()
+		}
+	case "max_context_chars":
+		if v, err := strconv.Atoi(strings.TrimSpace(m.retrievalInput)); err == nil && v > 0 {
+			m.settings.MaxContextChars = v
+			_ = m.settings.Save()
+		}
+	}
 }
 
 func (m AppModel) viewRetrievalSettingsContent() string {
-        var sb strings.Builder
-        sb.WriteString(ui.TitleStyle.Render("Retrieval Settings") + "\n\n")
-        for i, row := range retrievalSettingsRows {
-                isSelected := i == m.retrievalSettingsCursor
-                marker := "  "
-                numStr := fmt.Sprintf("[%d]", i+1)
-                if isSelected {
-                        marker = ui.ActiveFlagStyle.Render("▶ ")
-                        numStr = ui.TitleStyle.Render(numStr)
-                } else {
-                        numStr = ui.SystemMsgStyle.Render(numStr)
-                }
-                var valStr string
-                if row.key == m.retrievalEditing {
-                        valStr = ui.ActiveFlagStyle.Render(m.retrievalInput + "_")
-                } else {
-                        var val string
-                        switch row.key {
-                        case "final_k":
-                                val = strconv.Itoa(m.settings.FinalK)
-                        case "window":
-                                val = strconv.Itoa(m.tuiState.Window)
-                        case "min_results":
-                                val = strconv.Itoa(m.tuiState.MinResults)
-                        case "score_threshold":
-                                val = fmt.Sprintf("%.3f", m.tuiState.ScoreThreshold)
-                        case "max_context_chars":
-                                val = strconv.Itoa(m.settings.MaxContextChars)
-                        }
-                        if isSelected {
-                                valStr = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(val)
-                        } else {
-                                valStr = ui.SystemMsgStyle.Render(val)
-                        }
-                }
-                sb.WriteString(fmt.Sprintf("%s%s %-20s  %s\n", marker, numStr, row.label, valStr))
-        }
-        sb.WriteString("\n")
-        if m.retrievalEditing != "" {
-                sb.WriteString(ui.HelpStyle.Render("Enter to save · ESC to cancel"))
-        } else {
-                sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: edit · ESC: back"))
-        }
-        return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
-                ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
-        )
+	var sb strings.Builder
+	sb.WriteString(ui.TitleStyle.Render("Retrieval Settings") + "\n\n")
+	for i, row := range retrievalSettingsRows {
+		isSelected := i == m.retrievalSettingsCursor
+		marker := "  "
+		numStr := fmt.Sprintf("[%d]", i+1)
+		if isSelected {
+			marker = ui.ActiveFlagStyle.Render("▶ ")
+			numStr = ui.TitleStyle.Render(numStr)
+		} else {
+			numStr = ui.SystemMsgStyle.Render(numStr)
+		}
+		var valStr string
+		if row.key == m.retrievalEditing {
+			valStr = ui.ActiveFlagStyle.Render(m.retrievalInput + "_")
+		} else {
+			var val string
+			switch row.key {
+			case "final_k":
+				val = strconv.Itoa(m.settings.FinalK)
+			case "window":
+				val = strconv.Itoa(m.tuiState.Window)
+			case "min_results":
+				val = strconv.Itoa(m.tuiState.MinResults)
+			case "score_threshold":
+				val = fmt.Sprintf("%.3f", m.tuiState.ScoreThreshold)
+			case "max_context_chars":
+				val = strconv.Itoa(m.settings.MaxContextChars)
+			}
+			if isSelected {
+				valStr = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(val)
+			} else {
+				valStr = ui.SystemMsgStyle.Render(val)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("%s%s %-20s  %s\n", marker, numStr, row.label, valStr))
+	}
+	sb.WriteString("\n")
+	if m.retrievalEditing != "" {
+		sb.WriteString(ui.HelpStyle.Render("Enter to save · ESC to cancel"))
+	} else {
+		sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: edit · ESC: back"))
+	}
+	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
+		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
+	)
 }
 
 // ─── API settings ─────────────────────────────────────────────────────────────
 
 func (m *AppModel) handleAPISettingsKey(msg tea.KeyMsg) []tea.Cmd {
-        m.acConsumedKey = true
-        if m.apiSettingsEditing != "" {
-                switch msg.Type {
-                case tea.KeyEsc:
-                        m.apiSettingsEditing = ""
-                        m.apiSettingsInput = ""
-                case tea.KeyEnter:
-                        m.applyAPISettingsEdit()
-                        m.apiSettingsEditing = ""
-                        m.apiSettingsInput = ""
-                case tea.KeyBackspace, tea.KeyDelete:
-                        if len(m.apiSettingsInput) > 0 {
-                                runes := []rune(m.apiSettingsInput)
-                                m.apiSettingsInput = string(runes[:len(runes)-1])
-                        }
-                default:
-                        if msg.Type == tea.KeyRunes {
-                                m.apiSettingsInput += msg.String()
-                        }
-                }
-                return nil
-        }
-        switch msg.Type {
-        case tea.KeyEsc:
-                m.screen = ScreenSettingsMenu
-        case tea.KeyUp:
-                if m.apiSettingsCursor > 0 {
-                        m.apiSettingsCursor--
-                }
-        case tea.KeyDown:
-                if m.apiSettingsCursor < len(apiSettingsRows)-1 {
-                        m.apiSettingsCursor++
-                }
-        case tea.KeyEnter:
-                row := apiSettingsRows[m.apiSettingsCursor]
-                m.apiSettingsEditing = row.key
-                switch row.key {
-                case "api_key":
-                        m.apiSettingsInput = ""
-                case "base_url":
-                        m.apiSettingsInput = m.settings.NIMBaseURL
-                }
-        }
-        return nil
+	m.acConsumedKey = true
+	if m.apiSettingsEditing != "" {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.apiSettingsEditing = ""
+			m.apiSettingsInput = ""
+		case tea.KeyEnter:
+			m.applyAPISettingsEdit()
+			m.apiSettingsEditing = ""
+			m.apiSettingsInput = ""
+		case tea.KeyBackspace, tea.KeyDelete:
+			if len(m.apiSettingsInput) > 0 {
+				runes := []rune(m.apiSettingsInput)
+				m.apiSettingsInput = string(runes[:len(runes)-1])
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.apiSettingsInput += msg.String()
+			}
+		}
+		return nil
+	}
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenSettingsMenu
+	case tea.KeyUp:
+		if m.apiSettingsCursor > 0 {
+			m.apiSettingsCursor--
+		}
+	case tea.KeyDown:
+		if m.apiSettingsCursor < len(apiSettingsRows)-1 {
+			m.apiSettingsCursor++
+		}
+	case tea.KeyEnter:
+		row := apiSettingsRows[m.apiSettingsCursor]
+		m.apiSettingsEditing = row.key
+		switch row.key {
+		case "api_key":
+			m.apiSettingsInput = ""
+		case "base_url":
+			m.apiSettingsInput = m.settings.NIMBaseURL
+		case "hf_token":
+			m.apiSettingsInput = ""
+		}
+	}
+	return nil
 }
 
 func (m *AppModel) applyAPISettingsEdit() {
@@ -1320,295 +1341,307 @@ func (m *AppModel) applyAPISettingsEdit() {
 			m.settings.NIMBaseURL = v
 			_ = m.settings.Save()
 		}
+	case "hf_token":
+		if v := strings.TrimSpace(m.apiSettingsInput); v != "" {
+			v = strings.Trim(v, "[]")
+			m.settings.HFToken = v
+			_ = m.settings.Save()
+		}
 	}
 }
 
 func (m AppModel) viewAPISettingsContent() string {
-        var sb strings.Builder
-        sb.WriteString(ui.TitleStyle.Render("API Settings") + "\n\n")
-        for i, row := range apiSettingsRows {
-                isSelected := i == m.apiSettingsCursor
-                marker := "  "
-                numStr := fmt.Sprintf("[%d]", i+1)
-                if isSelected {
-                        marker = ui.ActiveFlagStyle.Render("▶ ")
-                        numStr = ui.TitleStyle.Render(numStr)
-                } else {
-                        numStr = ui.SystemMsgStyle.Render(numStr)
-                }
-                var valStr string
-                if row.key == m.apiSettingsEditing {
-                        valStr = ui.ActiveFlagStyle.Render(m.apiSettingsInput + "_")
-                } else {
-                        var val string
-                        switch row.key {
-                        case "api_key":
-                                if m.settings.NIMAPIKey != "" {
-                                        val = "••••" + m.settings.NIMAPIKey[max(0, len(m.settings.NIMAPIKey)-4):]
-                                } else {
-                                        val = "(not set)"
-                                }
-                        case "base_url":
-                                val = m.settings.NIMBaseURL
-                        }
-                        if isSelected {
-                                valStr = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(val)
-                        } else {
-                                valStr = ui.SystemMsgStyle.Render(val)
-                        }
-                }
-                sb.WriteString(fmt.Sprintf("%s%s %-14s  %s\n", marker, numStr, row.label, valStr))
-        }
-        sb.WriteString("\n")
-        if m.apiSettingsEditing != "" {
-                sb.WriteString(ui.HelpStyle.Render("Enter to save · ESC to cancel"))
-        } else {
-                sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: edit · ESC: back"))
-        }
-        return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
-                ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
-        )
+	var sb strings.Builder
+	sb.WriteString(ui.TitleStyle.Render("API Settings") + "\n\n")
+	for i, row := range apiSettingsRows {
+		isSelected := i == m.apiSettingsCursor
+		marker := "  "
+		numStr := fmt.Sprintf("[%d]", i+1)
+		if isSelected {
+			marker = ui.ActiveFlagStyle.Render("▶ ")
+			numStr = ui.TitleStyle.Render(numStr)
+		} else {
+			numStr = ui.SystemMsgStyle.Render(numStr)
+		}
+		var valStr string
+		if row.key == m.apiSettingsEditing {
+			valStr = ui.ActiveFlagStyle.Render(m.apiSettingsInput + "_")
+		} else {
+			var val string
+			switch row.key {
+			case "api_key":
+				if m.settings.NIMAPIKey != "" {
+					val = "••••" + m.settings.NIMAPIKey[max(0, len(m.settings.NIMAPIKey)-4):]
+				} else {
+					val = "(not set)"
+				}
+			case "base_url":
+				val = m.settings.NIMBaseURL
+			case "hf_token":
+				if m.settings.HFToken != "" {
+					val = "••••" + m.settings.HFToken[max(0, len(m.settings.HFToken)-4):]
+				} else {
+					val = "(not set)"
+				}
+			}
+			if isSelected {
+				valStr = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(val)
+			} else {
+				valStr = ui.SystemMsgStyle.Render(val)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("%s%s %-14s  %s\n", marker, numStr, row.label, valStr))
+	}
+	sb.WriteString("\n")
+	if m.apiSettingsEditing != "" {
+		sb.WriteString(ui.HelpStyle.Render("Enter to save · ESC to cancel"))
+	} else {
+		sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: edit · ESC: back"))
+	}
+	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
+		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
+	)
 }
 
 // ─── Interface settings ───────────────────────────────────────────────────────
 
 func (m *AppModel) handleInterfaceSettingsKey(msg tea.KeyMsg) []tea.Cmd {
-        m.acConsumedKey = true
-        switch msg.Type {
-        case tea.KeyEsc:
-                m.screen = ScreenSettingsMenu
-        case tea.KeyUp:
-                if m.ifaceSettingsCursor > 0 {
-                        m.ifaceSettingsCursor--
-                }
-        case tea.KeyDown:
-                if m.ifaceSettingsCursor < len(interfaceSettingsRows)-1 {
-                        m.ifaceSettingsCursor++
-                }
-        case tea.KeyEnter, tea.KeySpace:
-                row := interfaceSettingsRows[m.ifaceSettingsCursor]
-                switch row.key {
-                case "debug":
-                        m.tuiState.Debug = !m.tuiState.Debug
-                        m.saveState()
-                case "sources":
-                        m.tuiState.ShowSources = !m.tuiState.ShowSources
-                        m.saveState()
-                case "agent":
-                        m.tuiState.AgentMode = !m.tuiState.AgentMode
-                        m.saveState()
-                case "confident":
-                        m.tuiState.Confident = !m.tuiState.Confident
-                        m.saveState()
-                case "rag_only":
-                        m.tuiState.RAGOnly = !m.tuiState.RAGOnly
-                        m.saveState()
-                }
-        }
-        return nil
+	m.acConsumedKey = true
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenSettingsMenu
+	case tea.KeyUp:
+		if m.ifaceSettingsCursor > 0 {
+			m.ifaceSettingsCursor--
+		}
+	case tea.KeyDown:
+		if m.ifaceSettingsCursor < len(interfaceSettingsRows)-1 {
+			m.ifaceSettingsCursor++
+		}
+	case tea.KeyEnter, tea.KeySpace:
+		row := interfaceSettingsRows[m.ifaceSettingsCursor]
+		switch row.key {
+		case "debug":
+			m.tuiState.Debug = !m.tuiState.Debug
+			m.saveState()
+		case "sources":
+			m.tuiState.ShowSources = !m.tuiState.ShowSources
+			m.saveState()
+		case "agent":
+			m.tuiState.AgentMode = !m.tuiState.AgentMode
+			m.saveState()
+		case "confident":
+			m.tuiState.Confident = !m.tuiState.Confident
+			m.saveState()
+		case "rag_only":
+			m.tuiState.RAGOnly = !m.tuiState.RAGOnly
+			m.saveState()
+		}
+	}
+	return nil
 }
 
 func (m AppModel) viewInterfaceSettingsContent() string {
-        var sb strings.Builder
-        sb.WriteString(ui.TitleStyle.Render("Interface Settings") + "\n\n")
-        boolVal := func(b bool) string {
-                if b {
-                        return ui.ActiveFlagStyle.Render("on ")
-                }
-                return ui.SystemMsgStyle.Render("off")
-        }
-        for i, row := range interfaceSettingsRows {
-                isSelected := i == m.ifaceSettingsCursor
-                marker := "  "
-                numStr := fmt.Sprintf("[%d]", i+1)
-                if isSelected {
-                        marker = ui.ActiveFlagStyle.Render("▶ ")
-                        numStr = ui.TitleStyle.Render(numStr)
-                } else {
-                        numStr = ui.SystemMsgStyle.Render(numStr)
-                }
-                var val bool
-                switch row.key {
-                case "debug":
-                        val = m.tuiState.Debug
-                case "sources":
-                        val = m.tuiState.ShowSources
-                case "agent":
-                        val = m.tuiState.AgentMode
-                case "confident":
-                        val = m.tuiState.Confident
-                case "rag_only":
-                        val = m.tuiState.RAGOnly
-                }
-                label := row.label
-                if isSelected {
-                        label = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(label)
-                } else {
-                        label = ui.SystemMsgStyle.Render(label)
-                }
-                sb.WriteString(fmt.Sprintf("%s%s %-18s  %s\n", marker, numStr, label, boolVal(val)))
-        }
-        sb.WriteString("\n")
-        sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter/Space: toggle · ESC: back"))
-        return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
-                ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
-        )
+	var sb strings.Builder
+	sb.WriteString(ui.TitleStyle.Render("Interface Settings") + "\n\n")
+	boolVal := func(b bool) string {
+		if b {
+			return ui.ActiveFlagStyle.Render("on ")
+		}
+		return ui.SystemMsgStyle.Render("off")
+	}
+	for i, row := range interfaceSettingsRows {
+		isSelected := i == m.ifaceSettingsCursor
+		marker := "  "
+		numStr := fmt.Sprintf("[%d]", i+1)
+		if isSelected {
+			marker = ui.ActiveFlagStyle.Render("▶ ")
+			numStr = ui.TitleStyle.Render(numStr)
+		} else {
+			numStr = ui.SystemMsgStyle.Render(numStr)
+		}
+		var val bool
+		switch row.key {
+		case "debug":
+			val = m.tuiState.Debug
+		case "sources":
+			val = m.tuiState.ShowSources
+		case "agent":
+			val = m.tuiState.AgentMode
+		case "confident":
+			val = m.tuiState.Confident
+		case "rag_only":
+			val = m.tuiState.RAGOnly
+		}
+		label := row.label
+		if isSelected {
+			label = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(label)
+		} else {
+			label = ui.SystemMsgStyle.Render(label)
+		}
+		sb.WriteString(fmt.Sprintf("%s%s %-18s  %s\n", marker, numStr, label, boolVal(val)))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter/Space: toggle · ESC: back"))
+	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
+		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
+	)
 }
 
 // ─── Pipeline screen ──────────────────────────────────────────────────────────
 
 func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
-        m.acConsumedKey = true
+	m.acConsumedKey = true
 
-        // ── file picker mode (ingest) ─────────────────────────────────────────
-        if m.pipelineFilePicking {
-                switch msg.Type {
-                case tea.KeyEsc:
-                        m.pipelineFilePicking = false
-                case tea.KeyUp:
-                        if m.pipelineFileCursor > 0 {
-                                m.pipelineFileCursor--
-                        }
-                case tea.KeyDown:
-                        if m.pipelineFileCursor < len(m.chatFileList)-1 {
-                                m.pipelineFileCursor++
-                        }
-                case tea.KeyEnter:
-                        if len(m.chatFileList) > 0 {
-                                filename := m.chatFileList[m.pipelineFileCursor]
-                                path := filepath.Join(m.ragDir, "raw", filename)
-                                m.pipelineFilePicking = false
-                                m.screen = ScreenChat
-                                return []tea.Cmd{pipelineIngestCmd(m.bridge, path)}
-                        }
-                }
-                return nil
-        }
+	// ── file picker mode (ingest) ─────────────────────────────────────────
+	if m.pipelineFilePicking {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.pipelineFilePicking = false
+		case tea.KeyUp:
+			if m.pipelineFileCursor > 0 {
+				m.pipelineFileCursor--
+			}
+		case tea.KeyDown:
+			if m.pipelineFileCursor < len(m.chatFileList)-1 {
+				m.pipelineFileCursor++
+			}
+		case tea.KeyEnter:
+			if len(m.chatFileList) > 0 {
+				filename := m.chatFileList[m.pipelineFileCursor]
+				path := filepath.Join(m.ragDir, "raw", filename)
+				m.pipelineFilePicking = false
+				m.screen = ScreenChat
+				return []tea.Cmd{pipelineIngestCmd(m.bridge, path)}
+			}
+		}
+		return nil
+	}
 
-        // ── text input mode (test query) ──────────────────────────────────────
-        if m.pipelineInputMode {
-                switch msg.Type {
-                case tea.KeyEsc:
-                        m.pipelineInputMode = false
-                        m.pipelineInput = ""
-                case tea.KeyEnter:
-                        input := strings.TrimSpace(m.pipelineInput)
-                        m.pipelineInputMode = false
-                        m.pipelineInput = ""
-                        action := pipelineMenuItems[m.pipelineCursor].action
-                        switch action {
-                        case "test":
-                                return []tea.Cmd{pipelineTestCmd(m.bridge, input, m.settings.FinalK, m.tuiState.Window)}
-                        }
-                case tea.KeyBackspace, tea.KeyDelete:
-                        if len(m.pipelineInput) > 0 {
-                                runes := []rune(m.pipelineInput)
-                                m.pipelineInput = string(runes[:len(runes)-1])
-                        }
-                default:
-                        if msg.Type == tea.KeyRunes {
-                                m.pipelineInput += msg.String()
-                        }
-                }
-                return nil
-        }
+	// ── text input mode (test query) ──────────────────────────────────────
+	if m.pipelineInputMode {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.pipelineInputMode = false
+			m.pipelineInput = ""
+		case tea.KeyEnter:
+			input := strings.TrimSpace(m.pipelineInput)
+			m.pipelineInputMode = false
+			m.pipelineInput = ""
+			action := pipelineMenuItems[m.pipelineCursor].action
+			switch action {
+			case "test":
+				return []tea.Cmd{pipelineTestCmd(m.bridge, input, m.settings.FinalK, m.tuiState.Window)}
+			}
+		case tea.KeyBackspace, tea.KeyDelete:
+			if len(m.pipelineInput) > 0 {
+				runes := []rune(m.pipelineInput)
+				m.pipelineInput = string(runes[:len(runes)-1])
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.pipelineInput += msg.String()
+			}
+		}
+		return nil
+	}
 
-        // ── menu navigation ───────────────────────────────────────────────────
-        switch msg.Type {
-        case tea.KeyEsc:
-                m.screen = ScreenSettingsMenu
-        case tea.KeyUp:
-                if m.pipelineCursor > 0 {
-                        m.pipelineCursor--
-                }
-        case tea.KeyDown:
-                if m.pipelineCursor < len(pipelineMenuItems)-1 {
-                        m.pipelineCursor++
-                }
-        case tea.KeyEnter:
-                item := pipelineMenuItems[m.pipelineCursor]
-                switch item.action {
-                case "rebuild":
-                        return []tea.Cmd{pipelineRebuildCmd(m.bridge)}
-                case "stats":
-                        m.screen = ScreenChat
-                        return []tea.Cmd{fetchStatsCmd(m.bridge)}
-                case "check":
-                        m.screen = ScreenChat
-                        return []tea.Cmd{fetchCheckCmd(m.bridge)}
-                case "test":
-                        m.pipelineInputMode = true
-                        m.pipelinePrompt = "Enter query"
-                        m.pipelineInput = ""
-                case "ingest":
-                        m.pipelineFilePicking = true
-                        m.pipelineFileCursor = 0
-                        return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
-                }
-        }
-        return nil
+	// ── menu navigation ───────────────────────────────────────────────────
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenSettingsMenu
+	case tea.KeyUp:
+		if m.pipelineCursor > 0 {
+			m.pipelineCursor--
+		}
+	case tea.KeyDown:
+		if m.pipelineCursor < len(pipelineMenuItems)-1 {
+			m.pipelineCursor++
+		}
+	case tea.KeyEnter:
+		item := pipelineMenuItems[m.pipelineCursor]
+		switch item.action {
+		case "rebuild":
+			return []tea.Cmd{pipelineRebuildCmd(m.bridge)}
+		case "stats":
+			m.screen = ScreenChat
+			return []tea.Cmd{fetchStatsCmd(m.bridge)}
+		case "check":
+			m.screen = ScreenChat
+			return []tea.Cmd{fetchCheckCmd(m.bridge)}
+		case "test":
+			m.pipelineInputMode = true
+			m.pipelinePrompt = "Enter query"
+			m.pipelineInput = ""
+		case "ingest":
+			m.pipelineFilePicking = true
+			m.pipelineFileCursor = 0
+			return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
+		}
+	}
+	return nil
 }
 
 func (m AppModel) viewPipelineContent() string {
-        accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-        dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
-        valStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-        var sb strings.Builder
-        sb.WriteString(ui.TitleStyle.Render("Pipeline Management") + "\n\n")
+	var sb strings.Builder
+	sb.WriteString(ui.TitleStyle.Render("Pipeline Management") + "\n\n")
 
-        if m.pipelineFilePicking {
-                // ── file picker ───────────────────────────────────────────────
-                sb.WriteString(accentStyle.Render("◆ Ingest — pick file from raw/") + "\n\n")
-                if len(m.chatFileList) == 0 {
-                        sb.WriteString(dimStyle.Render("  No JSON files found in raw/") + "\n\n")
-                        sb.WriteString(dimStyle.Render("  Drop your chat export JSON into the ") +
-                                valStyle.Bold(true).Render("raw/") +
-                                dimStyle.Render(" directory, then come back here."))
-                } else {
-                        for i, f := range m.chatFileList {
-                                isSelected := i == m.pipelineFileCursor
-                                if isSelected {
-                                        sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") + valStyle.Bold(true).Render(f) + "\n")
-                                } else {
-                                        sb.WriteString(dimStyle.Render("  "+f) + "\n")
-                                }
-                        }
-                }
-                sb.WriteString("\n")
-                sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: ingest · ESC: back"))
+	if m.pipelineFilePicking {
+		// ── file picker ───────────────────────────────────────────────
+		sb.WriteString(accentStyle.Render("◆ Ingest — pick file from raw/") + "\n\n")
+		if len(m.chatFileList) == 0 {
+			sb.WriteString(dimStyle.Render("  No JSON files found in raw/") + "\n\n")
+			sb.WriteString(dimStyle.Render("  Drop your chat export JSON into the ") +
+				valStyle.Bold(true).Render("raw/") +
+				dimStyle.Render(" directory, then come back here."))
+		} else {
+			for i, f := range m.chatFileList {
+				isSelected := i == m.pipelineFileCursor
+				if isSelected {
+					sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") + valStyle.Bold(true).Render(f) + "\n")
+				} else {
+					sb.WriteString(dimStyle.Render("  "+f) + "\n")
+				}
+			}
+		}
+		sb.WriteString("\n")
+		sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: ingest · ESC: back"))
 
-        } else if m.pipelineInputMode {
-                // ── text input ────────────────────────────────────────────────
-                sb.WriteString(ui.SystemMsgStyle.Render(m.pipelinePrompt+": ") + ui.ActiveFlagStyle.Render(m.pipelineInput+"_"))
-                sb.WriteString("\n\n")
-                sb.WriteString(ui.HelpStyle.Render("Enter to confirm · ESC to cancel"))
+	} else if m.pipelineInputMode {
+		// ── text input ────────────────────────────────────────────────
+		sb.WriteString(ui.SystemMsgStyle.Render(m.pipelinePrompt+": ") + ui.ActiveFlagStyle.Render(m.pipelineInput+"_"))
+		sb.WriteString("\n\n")
+		sb.WriteString(ui.HelpStyle.Render("Enter to confirm · ESC to cancel"))
 
-        } else {
-                // ── menu ──────────────────────────────────────────────────────
-                descriptions := map[string]string{
-                        "ingest":  "incrementally add a new chat export from raw/",
-                        "check":   "show what date range to export from Discord/Slack",
-                        "rebuild": "reprocess all raw data from scratch",
-                        "test":    "run a retrieval query without calling the LLM",
-                        "stats":   "show chunk count and index info",
-                }
-                for i, item := range pipelineMenuItems {
-                        isSelected := i == m.pipelineCursor
-                        if isSelected {
-                                sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") +
-                                        accentStyle.Render(item.label) + "\n")
-                                sb.WriteString(dimStyle.Render("    "+descriptions[item.action]) + "\n\n")
-                        } else {
-                                sb.WriteString(dimStyle.Render("  "+item.label) + "\n\n")
-                        }
-                }
-                sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: run · ESC: back"))
-        }
+	} else {
+		// ── menu ──────────────────────────────────────────────────────
+		descriptions := map[string]string{
+			"ingest":  "incrementally add a new chat export from raw/",
+			"check":   "show what date range to export from Discord/Slack",
+			"rebuild": "reprocess all raw data from scratch",
+			"test":    "run a retrieval query without calling the LLM",
+			"stats":   "show chunk count and index info",
+		}
+		for i, item := range pipelineMenuItems {
+			isSelected := i == m.pipelineCursor
+			if isSelected {
+				sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") +
+					accentStyle.Render(item.label) + "\n")
+				sb.WriteString(dimStyle.Render("    "+descriptions[item.action]) + "\n\n")
+			} else {
+				sb.WriteString(dimStyle.Render("  "+item.label) + "\n\n")
+			}
+		}
+		sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: run · ESC: back"))
+	}
 
-        return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
-                ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
-        )
+	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
+		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
+	)
 }
 
 func (m *AppModel) handleSettingsKey(msg tea.KeyMsg) []tea.Cmd {
@@ -1869,7 +1902,6 @@ func (m *AppModel) applySettingsEdit() {
 	}
 	_ = m.settings.Save()
 }
-
 
 // updateAutocomplete recomputes suggestions based on current textarea content.
 // It also refreshes m.viewport.Height so the viewport shrinks to make room.
@@ -2358,21 +2390,22 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 		}
 
 		prompt := fmt.Sprintf(
-			"%s\n\nQuestion: %s\n\nSearches done: %v\nLow-quality searches (avoid similar): %v\n%s\n\nIMPORTANT: Do NOT append words to previous queries. Think of a completely new angle.\nContext retrieved so far:\n%s\n\nWhat do you do next? (SEARCH: ... or ANSWER: ...)",
-			system, question, searches, failed, remaining, ctxText,
+			"Question: %s\n\nSearches done: %v\nLow-quality searches (avoid similar): %v\n%s\n\nIMPORTANT: Do NOT append words to previous queries. Think of a completely new angle.\nContext retrieved so far:\n%s\n\nWhat do you do next? Reply with exactly one SEARCH: ... line or one ANSWER: ... response.",
+			question, searches, failed, remaining, ctxText,
 		)
 
 		messages := []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: system},
 			{Role: openai.ChatMessageRoleUser, Content: prompt},
 		}
 
 		resp, err := workers.CallLLM(ctx, cfg, messages)
 		if err != nil {
-			return AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[LLM error: %v]", err)}
+			return AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[LLM error: %v]", err), Raw: fmt.Sprintf("error: %v", err)}
 		}
 
 		action, payload := parseAgentResponse(resp)
-		return AgentLLMDoneMsg{Action: action, Payload: payload}
+		return AgentLLMDoneMsg{Action: action, Payload: payload, Raw: resp}
 	}
 }
 
@@ -2428,12 +2461,12 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 	if m.settings.NIMAPIKey == "" || m.tuiState.RAGOnly {
 		// ── styles ──────────────────────────────────────────────────────────
 		accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-		dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
-		rankStyle   := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
-		scoreStyle  := lipgloss.NewStyle().Foreground(ui.ColorCyan)
-		starStyle   := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
-		srcStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
-		textStyle   := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+		dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+		rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+		scoreStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+		starStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+		srcStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+		textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
 		// ── header notice ───────────────────────────────────────────────────
 		label := "NO API KEY"
@@ -2517,7 +2550,7 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 				lines = append(lines, string(runes))
 			}
 
-			sep  := dimStyle.Render(strings.Repeat("─", innerWidth))
+			sep := dimStyle.Render(strings.Repeat("─", innerWidth))
 			body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
 
 			borderColor := ui.ColorDim
@@ -2822,6 +2855,11 @@ func (m AppModel) renderStatusBar() string {
 	if chatName == "" {
 		chatName = "none"
 	}
+	activeFlag := lipgloss.NewStyle().
+		Foreground(ui.ColorDim).
+		Background(ui.ColorGreen).
+		Bold(true).
+		Padding(0, 1)
 	modelShort := m.settings.NIMModel
 	if idx := strings.LastIndex(modelShort, "/"); idx >= 0 {
 		modelShort = modelShort[idx+1:]
@@ -2837,22 +2875,22 @@ func (m AppModel) renderStatusBar() string {
 
 	// Flags shown only when active.
 	if m.tuiState.Debug {
-		parts = append(parts, ui.ActiveFlagStyle.Render("debug"))
+		parts = append(parts, activeFlag.Render("debug"))
 	}
 	if m.tuiState.ShowSources {
-		parts = append(parts, ui.ActiveFlagStyle.Render("sources"))
+		parts = append(parts, activeFlag.Render("sources"))
 	}
 	if m.tuiState.AgentMode {
-		parts = append(parts, ui.ActiveFlagStyle.Render("agent"))
+		parts = append(parts, activeFlag.Render("agent"))
 	}
 	if m.tuiState.Confident {
-		parts = append(parts, ui.ActiveFlagStyle.Render("confident"))
+		parts = append(parts, activeFlag.Render("confident"))
 	}
 	if m.settings.ThinkingMode {
-		parts = append(parts, ui.ActiveFlagStyle.Render("thinking"))
+		parts = append(parts, activeFlag.Render("thinking"))
 	}
 	if m.tuiState.OutputMode != "" && m.tuiState.OutputMode != "plain" {
-		parts = append(parts, ui.ActiveFlagStyle.Render("mode="+m.tuiState.OutputMode))
+		parts = append(parts, activeFlag.Render("mode="+m.tuiState.OutputMode))
 	}
 
 	// Busy state indicator.
@@ -3516,8 +3554,8 @@ SEARCH queries use semantic similarity — short, natural phrases (3-6 words) wo
 Each SEARCH returns the most relevant chat message chunks from the logs.
 
 Rules:
-- Output  SEARCH: <query>    to retrieve chunks from the chat log
-- Output  ANSWER: <response> when you have enough information
+- Output exactly one line starting with SEARCH: <query> to retrieve chunks from the chat log
+- Output exactly one response starting with ANSWER: <response> when you have enough information
 - %s
 - Use short, conversational phrases as queries — NOT boolean expressions or long sentences
 - Each SEARCH must be meaningfully different from previous ones
@@ -3526,44 +3564,61 @@ Rules:
 - NEVER build on a previous query by appending words to it
 - If you've done 3+ searches with no good results, just ANSWER with what you found
 - After 3-4 searches with no useful results, give your best ANSWER based on what was found
-- Do NOT keep searching if you already have enough context to answer`, budgetLine)
+- Do NOT keep searching if you already have enough context to answer
+- Do NOT output JSON, markdown, code fences, bullets, or explanations before SEARCH:/ANSWER:`, budgetLine)
 }
 
-// parseAgentResponse scans the LLM response line-by-line for the first
-// SEARCH: or ANSWER: directive and returns (action, payload).
+// parseAgentResponse scans the LLM response for the first SEARCH: or ANSWER:
+// directive. It tolerates fenced blocks, labels like [SEARCH], and simple JSON.
 func parseAgentResponse(response string) (action, payload string) {
-	re := regexp.MustCompile(`(?i)^(SEARCH|ANSWER):\s*(.*)`)
-	lines := strings.Split(response, "\n")
-	var contentLines []string
-	foundAction := ""
-
-	for _, line := range lines {
-		stripped := strings.TrimSpace(line)
-		if foundAction == "" {
-			if m := re.FindStringSubmatch(stripped); m != nil {
-				foundAction = strings.ToUpper(m[1])
-				if strings.TrimSpace(m[2]) != "" {
-					contentLines = append(contentLines, strings.TrimSpace(m[2]))
+	trimmed := strings.TrimSpace(response)
+	if strings.HasPrefix(trimmed, "{") {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(trimmed), &obj); err == nil {
+			if a, ok := obj["action"].(string); ok {
+				act := strings.ToUpper(strings.TrimSpace(a))
+				switch act {
+				case "SEARCH":
+					for _, key := range []string{"query", "payload", "content"} {
+						if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+							return "SEARCH", strings.TrimSpace(v)
+						}
+					}
+				case "ANSWER":
+					for _, key := range []string{"answer", "payload", "content"} {
+						if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+							return "ANSWER", strings.TrimSpace(v)
+						}
+					}
 				}
 			}
-		} else if foundAction == "ANSWER" {
-			contentLines = append(contentLines, stripped)
 		}
 	}
 
-	if foundAction == "" {
+	cleaned := strings.TrimSpace(trimmed)
+	cleaned = regexp.MustCompile("(?s)<think>.*?</think>").ReplaceAllString(cleaned, "")
+	cleaned = strings.ReplaceAll(cleaned, "```", "")
+
+	re := regexp.MustCompile(`(?im)(?:^|[\n\r])\s*(?:[-*]\s*)?(?:\[\s*)?(SEARCH|ANSWER)(?:\s*\])?\s*:\s*(.+)`)
+	match := re.FindStringSubmatch(cleaned)
+	if match == nil {
 		return "ANSWER", strings.TrimSpace(response)
 	}
 
-	joined := strings.Join(contentLines, "\n")
-	if foundAction == "SEARCH" && len(contentLines) > 0 {
-		// Take only the first line, strip junk after quotes/newlines
-		first := contentLines[0]
-		parts := regexp.MustCompile(`[\n"']| to | in order to `).Split(first, 2)
-		joined = strings.TrimSpace(parts[0])
+	foundAction := strings.ToUpper(strings.TrimSpace(match[1]))
+	foundPayload := strings.TrimSpace(match[2])
+	if foundAction == "SEARCH" {
+		firstLine := strings.TrimSpace(strings.Split(foundPayload, "\n")[0])
+		firstLine = strings.Trim(firstLine, `"'[] `)
+		firstLine = regexp.MustCompile(`\s+(?:to|in order to)\b.*$`).ReplaceAllString(firstLine, "")
+		return "SEARCH", firstLine
 	}
 
-	return foundAction, joined
+	answerStart := strings.Index(strings.ToUpper(cleaned), "ANSWER:")
+	if answerStart >= 0 {
+		return "ANSWER", strings.TrimSpace(cleaned[answerStart+len("ANSWER:"):])
+	}
+	return "ANSWER", foundPayload
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
@@ -4150,224 +4205,224 @@ func (m AppModel) chatViewVpWidth() int {
 // ─── RAG browser ──────────────────────────────────────────────────────────────
 
 func (m *AppModel) openRagBrowser() {
-if len(m.ragBrowseChunks) == 0 {
-return
-}
-m.ragBrowseCursor = 0
-m.ragBrowseCtxOpen = false
-vpH := m.height - 8 // full-screen minus borders/status
-if vpH < 5 {
-vpH = 5
-}
-m.ragBrowseVP = viewport.New(m.width-4, vpH)
-m.ragBrowseVP.SetContent(m.renderRagBrowserList())
-m.screen = ScreenRagBrowser
+	if len(m.ragBrowseChunks) == 0 {
+		return
+	}
+	m.ragBrowseCursor = 0
+	m.ragBrowseCtxOpen = false
+	vpH := m.height - 8 // full-screen minus borders/status
+	if vpH < 5 {
+		vpH = 5
+	}
+	m.ragBrowseVP = viewport.New(m.width-4, vpH)
+	m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+	m.screen = ScreenRagBrowser
 }
 
 func (m *AppModel) renderRagBrowserList() string {
-accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
-rankStyle   := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
-scoreStyle  := lipgloss.NewStyle().Foreground(ui.ColorCyan)
-starStyle   := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
-srcStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
-textStyle   := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+	scoreStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+	starStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+	srcStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-cardWidth := m.width - 6
-if cardWidth < 52 {
-cardWidth = 52
-}
-innerWidth := cardWidth - 6
+	cardWidth := m.width - 6
+	if cardWidth < 52 {
+		cardWidth = 52
+	}
+	innerWidth := cardWidth - 6
 
-var parts []string
-for i, r := range m.ragBrowseChunks {
-score := r.RerankScore
-if score == 0 {
-score = r.Score
-}
-const barLen = 10
-filled := int(score * float64(barLen))
-if filled > barLen {
-filled = barLen
-}
-bar := scoreStyle.Render(strings.Repeat("█", filled)) +
-dimStyle.Render(strings.Repeat("░", barLen-filled))
+	var parts []string
+	for i, r := range m.ragBrowseChunks {
+		score := r.RerankScore
+		if score == 0 {
+			score = r.Score
+		}
+		const barLen = 10
+		filled := int(score * float64(barLen))
+		if filled > barLen {
+			filled = barLen
+		}
+		bar := scoreStyle.Render(strings.Repeat("█", filled)) +
+			dimStyle.Render(strings.Repeat("░", barLen-filled))
 
-star := dimStyle.Render("·")
-if r.KeywordBoosted {
-star = starStyle.Render("★")
-}
-ts := r.Chunk.TimestampStart
-if len(ts) > 19 {
-ts = ts[:19]
-}
-meta := rankStyle.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
-bar + "  " +
-scoreStyle.Render(fmt.Sprintf("%.4f", score)) + "  " +
-star + "  " +
-srcStyle.Render(r.Source) + "  " +
-dimStyle.Render(ts)
+		star := dimStyle.Render("·")
+		if r.KeywordBoosted {
+			star = starStyle.Render("★")
+		}
+		ts := r.Chunk.TimestampStart
+		if len(ts) > 19 {
+			ts = ts[:19]
+		}
+		meta := rankStyle.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
+			bar + "  " +
+			scoreStyle.Render(fmt.Sprintf("%.4f", score)) + "  " +
+			star + "  " +
+			srcStyle.Render(r.Source) + "  " +
+			dimStyle.Render(ts)
 
-text := strings.Join(strings.Fields(r.Chunk.Text), " ")
-maxLen := innerWidth * 4
-if maxLen < 80 {
-maxLen = 80
-}
-if len(text) > maxLen {
-text = text[:maxLen] + "…"
-}
-runes := []rune(text)
-var lines []string
-for len(runes) > innerWidth {
-cut := innerWidth
-for cut > 0 && runes[cut] != ' ' {
-cut--
-}
-if cut == 0 {
-cut = innerWidth
-}
-lines = append(lines, string(runes[:cut]))
-runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
-}
-if len(runes) > 0 {
-lines = append(lines, string(runes))
-}
+		text := strings.Join(strings.Fields(r.Chunk.Text), " ")
+		maxLen := innerWidth * 4
+		if maxLen < 80 {
+			maxLen = 80
+		}
+		if len(text) > maxLen {
+			text = text[:maxLen] + "…"
+		}
+		runes := []rune(text)
+		var lines []string
+		for len(runes) > innerWidth {
+			cut := innerWidth
+			for cut > 0 && runes[cut] != ' ' {
+				cut--
+			}
+			if cut == 0 {
+				cut = innerWidth
+			}
+			lines = append(lines, string(runes[:cut]))
+			runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
+		}
+		if len(runes) > 0 {
+			lines = append(lines, string(runes))
+		}
 
-sep  := dimStyle.Render(strings.Repeat("─", innerWidth))
-body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
+		sep := dimStyle.Render(strings.Repeat("─", innerWidth))
+		body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
 
-borderColor := ui.ColorDim
-if i == m.ragBrowseCursor {
-borderColor = ui.ColorCyan
-body = accentStyle.Render("▶ ") + body
-}
+		borderColor := ui.ColorDim
+		if i == m.ragBrowseCursor {
+			borderColor = ui.ColorCyan
+			body = accentStyle.Render("▶ ") + body
+		}
 
-card := lipgloss.NewStyle().
-Border(lipgloss.RoundedBorder()).
-BorderForeground(borderColor).
-Padding(0, 1).
-Width(cardWidth).
-Render(body)
+		card := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Padding(0, 1).
+			Width(cardWidth).
+			Render(body)
 
-if i > 0 {
-parts = append(parts, "")
-}
-parts = append(parts, card)
-}
-return strings.Join(parts, "\n")
+		if i > 0 {
+			parts = append(parts, "")
+		}
+		parts = append(parts, card)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (m *AppModel) renderRagBrowserCtx() string {
-if m.ragBrowseCursor >= len(m.ragBrowseChunks) {
-return ""
-}
-r := m.ragBrowseChunks[m.ragBrowseCursor]
+	if m.ragBrowseCursor >= len(m.ragBrowseChunks) {
+		return ""
+	}
+	r := m.ragBrowseChunks[m.ragBrowseCursor]
 
-titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-dimStyle   := lipgloss.NewStyle().Foreground(ui.ColorDim)
-userStyle  := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
-tsStyle    := lipgloss.NewStyle().Foreground(ui.ColorYellow)
-textStyle  := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	userStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+	tsStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow)
+	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
-cardWidth := m.width - 6
-innerWidth := cardWidth - 6
+	cardWidth := m.width - 6
+	innerWidth := cardWidth - 6
 
-var lines []string
-title := titleStyle.Render(fmt.Sprintf("Context window — chunk #%d", m.ragBrowseCursor+1))
-lines = append(lines, title)
-lines = append(lines, dimStyle.Render(strings.Repeat("─", innerWidth)))
+	var lines []string
+	title := titleStyle.Render(fmt.Sprintf("Context window — chunk #%d", m.ragBrowseCursor+1))
+	lines = append(lines, title)
+	lines = append(lines, dimStyle.Render(strings.Repeat("─", innerWidth)))
 
-if len(r.ContextWindow) == 0 {
-// Fall back to the chunk itself.
-lines = append(lines, textStyle.Render(r.Chunk.Text))
-} else {
-for _, c := range r.ContextWindow {
-ts := c.TimestampStart
-if len(ts) > 19 {
-ts = ts[:19]
-}
-prefix := userStyle.Render(c.Sender) + "  " + tsStyle.Render(ts) + "  "
-lines = append(lines, prefix+textStyle.Render(c.Text))
-}
-}
-return strings.Join(lines, "\n")
+	if len(r.ContextWindow) == 0 {
+		// Fall back to the chunk itself.
+		lines = append(lines, textStyle.Render(r.Chunk.Text))
+	} else {
+		for _, c := range r.ContextWindow {
+			ts := c.TimestampStart
+			if len(ts) > 19 {
+				ts = ts[:19]
+			}
+			prefix := userStyle.Render(c.Sender) + "  " + tsStyle.Render(ts) + "  "
+			lines = append(lines, prefix+textStyle.Render(c.Text))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
-m.acConsumedKey = true
-switch msg.Type {
-case tea.KeyEsc:
-if m.ragBrowseCtxOpen {
-m.ragBrowseCtxOpen = false
-} else {
-m.screen = ScreenChat
-}
-case tea.KeyUp:
-if m.ragBrowseCtxOpen {
-m.ragBrowseCtxVP.LineUp(3)
-} else {
-if m.ragBrowseCursor > 0 {
-m.ragBrowseCursor--
-m.ragBrowseVP.SetContent(m.renderRagBrowserList())
-}
-}
-case tea.KeyDown:
-if m.ragBrowseCtxOpen {
-m.ragBrowseCtxVP.LineDown(3)
-} else {
-if m.ragBrowseCursor < len(m.ragBrowseChunks)-1 {
-m.ragBrowseCursor++
-m.ragBrowseVP.SetContent(m.renderRagBrowserList())
-}
-}
-case tea.KeyPgUp:
-if m.ragBrowseCtxOpen {
-m.ragBrowseCtxVP.HalfViewUp()
-} else {
-m.ragBrowseVP.HalfViewUp()
-}
-case tea.KeyPgDown:
-if m.ragBrowseCtxOpen {
-m.ragBrowseCtxVP.HalfViewDown()
-} else {
-m.ragBrowseVP.HalfViewDown()
-}
-case tea.KeyEnter:
-if !m.ragBrowseCtxOpen && m.ragBrowseCursor < len(m.ragBrowseChunks) {
-vpH := m.height - 10
-if vpH < 5 {
-vpH = 5
-}
-m.ragBrowseCtxVP = viewport.New(m.width-6, vpH)
-m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
-m.ragBrowseCtxVP.GotoTop()
-m.ragBrowseCtxOpen = true
-}
-}
-return nil
+	m.acConsumedKey = true
+	switch msg.Type {
+	case tea.KeyEsc:
+		if m.ragBrowseCtxOpen {
+			m.ragBrowseCtxOpen = false
+		} else {
+			m.screen = ScreenChat
+		}
+	case tea.KeyUp:
+		if m.ragBrowseCtxOpen {
+			m.ragBrowseCtxVP.LineUp(3)
+		} else {
+			if m.ragBrowseCursor > 0 {
+				m.ragBrowseCursor--
+				m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+			}
+		}
+	case tea.KeyDown:
+		if m.ragBrowseCtxOpen {
+			m.ragBrowseCtxVP.LineDown(3)
+		} else {
+			if m.ragBrowseCursor < len(m.ragBrowseChunks)-1 {
+				m.ragBrowseCursor++
+				m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+			}
+		}
+	case tea.KeyPgUp:
+		if m.ragBrowseCtxOpen {
+			m.ragBrowseCtxVP.HalfViewUp()
+		} else {
+			m.ragBrowseVP.HalfViewUp()
+		}
+	case tea.KeyPgDown:
+		if m.ragBrowseCtxOpen {
+			m.ragBrowseCtxVP.HalfViewDown()
+		} else {
+			m.ragBrowseVP.HalfViewDown()
+		}
+	case tea.KeyEnter:
+		if !m.ragBrowseCtxOpen && m.ragBrowseCursor < len(m.ragBrowseChunks) {
+			vpH := m.height - 10
+			if vpH < 5 {
+				vpH = 5
+			}
+			m.ragBrowseCtxVP = viewport.New(m.width-6, vpH)
+			m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
+			m.ragBrowseCtxVP.GotoTop()
+			m.ragBrowseCtxOpen = true
+		}
+	}
+	return nil
 }
 
 func (m AppModel) viewRagBrowserContent() string {
-dimStyle   := lipgloss.NewStyle().Foreground(ui.ColorDim)
-titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 
-n := len(m.ragBrowseChunks)
-title := titleStyle.Render(fmt.Sprintf("Chunk Browser  (%d/%d)", m.ragBrowseCursor+1, n))
-help  := dimStyle.Render("↑↓ move · Enter view context · Esc back")
+	n := len(m.ragBrowseChunks)
+	title := titleStyle.Render(fmt.Sprintf("Chunk Browser  (%d/%d)", m.ragBrowseCursor+1, n))
+	help := dimStyle.Render("↑↓ move · Enter view context · Esc back")
 
-var inner string
-if m.ragBrowseCtxOpen {
-ctxTitle := titleStyle.Render(fmt.Sprintf("Context — chunk #%d", m.ragBrowseCursor+1))
-ctxHelp  := dimStyle.Render("↑↓ / PgUp/PgDn scroll · Esc back to list")
-inner = ctxTitle + "\n" + m.ragBrowseCtxVP.View() + "\n" + ctxHelp
-} else {
-inner = title + "\n" + m.ragBrowseVP.View() + "\n" + help
-}
+	var inner string
+	if m.ragBrowseCtxOpen {
+		ctxTitle := titleStyle.Render(fmt.Sprintf("Context — chunk #%d", m.ragBrowseCursor+1))
+		ctxHelp := dimStyle.Render("↑↓ / PgUp/PgDn scroll · Esc back to list")
+		inner = ctxTitle + "\n" + m.ragBrowseCtxVP.View() + "\n" + ctxHelp
+	} else {
+		inner = title + "\n" + m.ragBrowseVP.View() + "\n" + help
+	}
 
-return lipgloss.NewStyle().
-Border(lipgloss.RoundedBorder()).
-BorderForeground(ui.ColorCyan).
-Padding(0, 1).
-Width(m.width - 2).
-Render(inner)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ui.ColorCyan).
+		Padding(0, 1).
+		Width(m.width - 2).
+		Render(inner)
 }
