@@ -3,7 +3,6 @@ package model
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -96,35 +95,38 @@ func RenderClarify(cs *ClarifyState, width int) string {
 		cardWidth = 48
 	}
 
-	accentStyle  := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
-	dimStyle     := lipgloss.NewStyle().Foreground(ui.ColorDim)
-	cursorStyle  := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	cursorStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
 	selectedStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
-	unselStyle   := lipgloss.NewStyle().Foreground(ui.ColorWhite)
-	idDimStyle   := lipgloss.NewStyle().Foreground(ui.ColorDim)
-	idSelStyle   := lipgloss.NewStyle().Foreground(ui.ColorCyan)
-	inputStyle   := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+	unselStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+	idDimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	idSelStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+	inputStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
 	var rows []string
+	idWidth := 0
+	for _, opt := range cs.Options {
+		if w := lipgloss.Width("[" + opt.ID + "]"); w > idWidth {
+			idWidth = w
+		}
+	}
 
 	// Question line
 	rows = append(rows, accentStyle.Render("? ")+unselStyle.Render(cs.Question))
 	rows = append(rows, "")
 
 	for i, opt := range cs.Options {
+		marker := lipgloss.NewStyle().Width(1).Render(" ")
+		idStyle := idDimStyle
+		labelStyle := unselStyle
 		if i == cs.Cursor {
-			rows = append(rows, fmt.Sprintf("  %s  %s  %s",
-				cursorStyle.Render("❯"),
-				idSelStyle.Render("["+opt.ID+"]"),
-				selectedStyle.Render(opt.Label),
-			))
-		} else {
-			rows = append(rows, fmt.Sprintf("  %s  %s  %s",
-				" ",
-				idDimStyle.Render("["+opt.ID+"]"),
-				unselStyle.Render(opt.Label),
-			))
+			marker = cursorStyle.Width(1).Render("▶")
+			idStyle = idSelStyle
+			labelStyle = selectedStyle
 		}
+		idCell := idStyle.Width(idWidth).Render("[" + opt.ID + "]")
+		rows = append(rows, "  "+marker+"  "+idCell+"  "+labelStyle.Render(opt.Label))
 	}
 
 	if cs.AllowFreeInput {

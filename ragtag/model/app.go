@@ -117,6 +117,7 @@ var allCommands = []cmdSuggestion{
 	{"/sources", "toggle source table in replies", 2},
 	{"/agent", "toggle / run agentic mode", 3},
 	{"/tools", "show or toggle agent tools", 3},
+	{"/clear", "clear the visible chat log", 3},
 	{"/pause", "pause/stop current AI response", 3},
 	{"/update", "update ragtag to the latest version", 3},
 	{"/mode", "set output mode: plain / structured / rich", 4},
@@ -125,7 +126,7 @@ var allCommands = []cmdSuggestion{
 	{"/window", "set context window size", 6},
 	{"/settings", "open settings panel", 7},
 	{"/chats", "switch between chats", 8},
-	{"/help", "show command reference", 9},
+	{"/help", "open the interactive help browser", 9},
 	{"/stats", "show index statistics", 10},
 	{"/pipeline", "open pipeline management", 10},
 	{"/ingest", "pick a raw/ file and ingest it", 10},
@@ -138,6 +139,20 @@ var allCommands = []cmdSuggestion{
 	{"/threshold", "set score threshold (e.g. /threshold 1.5)", 13},
 	{"/back", "go back to chat", 13},
 	{"/exit", "exit the TUI", 14},
+}
+
+type helpSection struct {
+	id      string
+	title   string
+	summary string
+}
+
+var helpSections = []helpSection{
+	{"getting-started", "Getting Started", "The fast path for asking questions and switching modes."},
+	{"commands", "Commands", "What each slash command does, including /clear."},
+	{"features", "Features & Modes", "Agent mode, output modes, chunk browser, sources, and updates."},
+	{"tips", "Tips & Tricks", "Small habits that make ragtag feel a lot better to use."},
+	{"models", "Models & Retrieval", "How defaults, model picking, retrieval, and window size interact."},
 }
 
 // allModels is the built-in model catalogue, numbered 1–N for /model N.
@@ -319,7 +334,9 @@ type AppModel struct {
 	acConsumedKey bool // true = skip textarea/viewport Update for this msg
 
 	// Help pager
-	helpVp viewport.Model
+	helpVp      viewport.Model
+	helpCursor  int
+	helpSection string
 
 	// Settings navigation
 	settingsCursor          int
@@ -542,9 +559,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.SetWidth(msg.Width - 8)
 		m.helpVp.Width = m.helpVpWidth()
 		m.helpVp.Height = m.helpVpHeight()
-		m.helpVp.SetContent(m.buildHelpContent())
+		m.refreshHelpContent()
 		m.chatViewVP.Width = m.chatViewVpWidth()
 		m.chatViewVP.Height = m.chatViewVpHeight()
+		if m.screen == ScreenRagBrowser {
+			m.resizeRagBrowserViewports()
+		}
 		m.renderMessages()
 
 	// ── Spinner tick ───────────────────────────────────────────────────────
@@ -996,8 +1016,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Forward events to textarea when user can type (chat + help screens).
-	if m.screen == ScreenChat || m.screen == ScreenHelp {
+	// Forward events to textarea only on the main chat screen.
+	if m.screen == ScreenChat {
 		if !m.acConsumedKey {
 			var taCmd tea.Cmd
 			m.textarea, taCmd = m.textarea.Update(msg)
@@ -1794,15 +1814,37 @@ func (m *AppModel) handleChatsKey(msg tea.KeyMsg) []tea.Cmd {
 }
 
 func (m *AppModel) handleHelpKey(msg tea.KeyMsg) []tea.Cmd {
+	if m.helpSection == "" {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.screen = ScreenChat
+			m.acConsumedKey = true
+		case tea.KeyEnter:
+			m.helpSection = helpSections[m.helpCursor].id
+			m.refreshHelpContent()
+			m.helpVp.GotoTop()
+			m.acConsumedKey = true
+		case tea.KeyUp:
+			if m.helpCursor > 0 {
+				m.helpCursor--
+				m.refreshHelpContent()
+			}
+			m.acConsumedKey = true
+		case tea.KeyDown:
+			if m.helpCursor < len(helpSections)-1 {
+				m.helpCursor++
+				m.refreshHelpContent()
+			}
+			m.acConsumedKey = true
+		}
+		return nil
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc:
-		m.screen = ScreenChat
+		m.helpSection = ""
+		m.refreshHelpContent()
 		m.acConsumedKey = true
-	case tea.KeyEnter:
-		// Submit whatever is in the textarea and return to chat.
-		m.acConsumedKey = true
-		m.screen = ScreenChat
-		return m.handleChatKey(msg)
 	case tea.KeyUp:
 		m.helpVp.LineUp(1)
 		m.acConsumedKey = true
@@ -2248,9 +2290,11 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 
 	case "/help":
 		m.screen = ScreenHelp
+		m.helpSection = ""
+		m.helpCursor = 0
 		m.helpVp.Width = m.helpVpWidth()
 		m.helpVp.Height = m.helpVpHeight()
-		m.helpVp.SetContent(m.buildHelpContent())
+		m.refreshHelpContent()
 		m.helpVp.GotoTop()
 
 	case "/stats":
@@ -2695,13 +2739,6 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 			Sources:     m.streamSources,
 			Prerendered: true,
 		})
-		// Hint message
-		hintStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
-		m.addMessage(ChatMessage{
-			Role:        "system",
-			Content:     hintStyle.Render("↑↓ navigate chunks  ·  Enter view context  ·  press B to open browser"),
-			Prerendered: true,
-		})
 		m.streamSources = nil
 		return nil
 	}
@@ -3079,7 +3116,11 @@ func (m AppModel) renderInputRow() string {
 
 	var parts []string
 	if m.screen == ScreenHelp {
-		parts = append(parts, ui.HelpStyle.Render("  ↑↓ PgUp/PgDn: scroll · ESC: close · type and press Enter to submit"))
+		hint := "  ↑↓ choose category · Enter open · Esc close"
+		if m.helpSection != "" {
+			hint = "  ↑↓ PgUp/PgDn scroll · Esc back"
+		}
+		parts = append(parts, ui.HelpStyle.Render(hint))
 	}
 	parts = append(parts, inputBox)
 	if m.acActive && len(m.acSuggestions) > 0 {
@@ -3226,74 +3267,113 @@ func (m AppModel) viewHelpContent() string {
 		Render(m.helpVp.View())
 }
 
-// buildHelpContent returns the fully-styled text that is loaded into helpVp.
-func (m AppModel) buildHelpContent() string {
-	var modelList strings.Builder
-	for i, mdl := range allModels {
-		modelList.WriteString(fmt.Sprintf("  [%2d] %s\n", i+1, mdl))
+func (m *AppModel) refreshHelpContent() {
+	if m.helpSection == "" {
+		m.helpVp.SetContent(m.buildHelpContent())
+		return
 	}
+	m.helpVp.SetContent(m.buildHelpSectionContent(m.helpSection))
+}
 
+// buildHelpContent returns the interactive help category menu.
+func (m AppModel) buildHelpContent() string {
+	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	sectionStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	selectedStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("ragtag · Help") + "\n\n")
+	sb.WriteString(dimStyle.Render("Choose a category and press Enter.\n\n"))
+
+	for i, section := range helpSections {
+		marker := "  "
+		title := sectionStyle.Render(section.title)
+		summary := dimStyle.Render(section.summary)
+		if i == m.helpCursor {
+			marker = "▶ "
+			title = selectedStyle.Render(section.title)
+			summary = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(section.summary)
+		}
+		sb.WriteString(marker + title + "\n")
+		sb.WriteString("   " + summary + "\n\n")
+	}
+	sb.WriteString(dimStyle.Render("Tip: /help opens this menu anytime. /clear wipes the visible chat log only."))
+	return sb.String()
+}
+
+func (m AppModel) buildHelpSectionContent(sectionID string) string {
 	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 	sectionStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
 	cmdStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow)
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("ragtag · Help") + "\n\n")
-
-	sb.WriteString(sectionStyle.Render("Commands") + "\n")
-	cmds := [][2]string{
-		{"/debug", "toggle debug output"},
-		{"/sources", "toggle source table in replies"},
-		{"/confident", "toggle confident mode (agentic: more thorough)"},
-		{"/window N", "set context window size"},
-		{"/k N", "set final_k (chunks passed to LLM)"},
-		{"/minresults N", "set minimum result count (adaptive threshold)"},
-		{"/threshold F", "set score threshold (e.g. /threshold 3.5)"},
-		{"/model N", "set model by number (e.g. /model 10 = deepseek-v3.2)"},
-		{"/model <nick>", "set model by nickname (e.g. /model deepseek)"},
-		{"/model", "open interactive model picker"},
-		{"/agent", "toggle agentic mode"},
-		{"/agent N q", "run agentic query with max N steps"},
-		{"/tools", "show agent tool toggles"},
-		{"/tools search off", "disable agent SEARCH retrieval"},
-		{"/tools context off", "disable context-window expansion"},
-		{"/thinking", "toggle thinking mode"},
-		{"/rag", "toggle RAG-only mode (skip LLM)"},
-		{"/mode", "cycle output mode: plain → structured → rich"},
-		{"/mode plain", "plain prose output (default)"},
-		{"/mode structured", "JSON: summary + key_points"},
-		{"/mode rich", "rich components: chat logs, tables, timelines"},
-		{"/pause", "pause / cancel the current AI operation"},
-		{"/update", "download and install the latest ragtag binary"},
-		{"/pipeline", "open pipeline management screen"},
-		{"/ingest", "pick a file from raw/ and ingest it"},
-		{"/check", "show what date range to export next"},
-		{"/view", "browse and read raw chat JSON files"},
-		{"/chats", "switch between chats"},
-		{"/settings", "open settings categories"},
-		{"/stats", "show index statistics"},
-		{"/help", "show this screen"},
+	switch sectionID {
+	case "getting-started":
+		sb.WriteString(titleStyle.Render("Help · Getting Started") + "\n\n")
+		sb.WriteString("1. Ask normally in the main chat box. Ragtag retrieves matching chunks, then asks the model to answer from them.\n")
+		sb.WriteString("2. Toggle " + cmdStyle.Render("/agent") + " when you want multi-step searching instead of one retrieval pass.\n")
+		sb.WriteString("3. Use " + cmdStyle.Render("/rag") + " for retrieval-only mode when you want to inspect chunks without calling the LLM.\n")
+		sb.WriteString("4. Use " + cmdStyle.Render("/sources") + " and " + cmdStyle.Render("/debug") + " when you want to see what the system actually retrieved.\n\n")
+		sb.WriteString(sectionStyle.Render("Good first commands") + "\n")
+		sb.WriteString("  " + cmdStyle.Render("/help") + "          open this help browser\n")
+		sb.WriteString("  " + cmdStyle.Render("/model") + "         pick a model interactively\n")
+		sb.WriteString("  " + cmdStyle.Render("/window 10") + "     show more surrounding context\n")
+		sb.WriteString("  " + cmdStyle.Render("/clear") + "         clear the visible conversation\n")
+	case "commands":
+		sb.WriteString(titleStyle.Render("Help · Commands") + "\n\n")
+		sb.WriteString(sectionStyle.Render("Core flow") + "\n")
+		sb.WriteString("  " + cmdStyle.Render("/agent") + "            toggle agent mode\n")
+		sb.WriteString("  " + cmdStyle.Render("/agent N query") + "    run one agentic query with a step cap\n")
+		sb.WriteString("  " + cmdStyle.Render("/pause") + "            stop the current retrieval or stream\n")
+		sb.WriteString("  " + cmdStyle.Render("/clear") + "            clear the chat log in the TUI\n\n")
+		sb.WriteString(sectionStyle.Render("Output and visibility") + "\n")
+		sb.WriteString("  " + cmdStyle.Render("/mode") + "             cycle plain / structured / rich\n")
+		sb.WriteString("  " + cmdStyle.Render("/sources") + "          show source tables under answers\n")
+		sb.WriteString("  " + cmdStyle.Render("/debug") + "            show diagnostics and log path\n")
+		sb.WriteString("  " + cmdStyle.Render("/tools") + "            inspect agent tool toggles\n\n")
+		sb.WriteString(sectionStyle.Render("Retrieval and data") + "\n")
+		sb.WriteString("  " + cmdStyle.Render("/window N") + "         set context-window size\n")
+		sb.WriteString("  " + cmdStyle.Render("/k N") + "              set chunks sent to the model\n")
+		sb.WriteString("  " + cmdStyle.Render("/minresults N") + "     adaptive floor for kept results\n")
+		sb.WriteString("  " + cmdStyle.Render("/threshold F") + "     explicit rerank-score cutoff\n")
+		sb.WriteString("  " + cmdStyle.Render("/pipeline") + "         open ingestion/rebuild tools\n")
+		sb.WriteString("  " + cmdStyle.Render("/ingest") + "           import a file from raw/\n")
+		sb.WriteString("  " + cmdStyle.Render("/view") + "             browse raw exported chat files\n")
+		sb.WriteString("  " + cmdStyle.Render("/chats") + "            switch active indexed chat\n")
+	case "features":
+		sb.WriteString(titleStyle.Render("Help · Features & Modes") + "\n\n")
+		sb.WriteString(sectionStyle.Render("Agent mode") + "\n")
+		sb.WriteString("Agent mode loops through SEARCH → retrieve → decide again. It is best when the answer needs a few different search angles.\n\n")
+		sb.WriteString(sectionStyle.Render("Chunk browser") + "\n")
+		sb.WriteString("In RAG-only mode, press " + cmdStyle.Render("B") + " after results appear to open the chunk browser. Use ↑↓ to move and Enter to inspect the matched chunk with surrounding context.\n\n")
+		sb.WriteString(sectionStyle.Render("Output modes") + "\n")
+		sb.WriteString("Plain keeps answers simple. Structured asks for summary + key points JSON. Rich asks for components like chat logs, lists, timelines, and tables.\n\n")
+		sb.WriteString(sectionStyle.Render("Update flow") + "\n")
+		sb.WriteString("When a newer version exists, ragtag shows a startup prompt and a status-bar notice. " + cmdStyle.Render("/update") + " downloads and installs it.\n")
+	case "tips":
+		sb.WriteString(titleStyle.Render("Help · Tips & Tricks") + "\n\n")
+		sb.WriteString("• Ask short, concrete questions first. Semantic retrieval usually works better with direct phrasing than with long prompts.\n")
+		sb.WriteString("• If answers feel shallow, raise " + cmdStyle.Render("/window") + " before raising " + cmdStyle.Render("/k") + ". More nearby chat often helps more than more unrelated chunks.\n")
+		sb.WriteString("• Use " + cmdStyle.Render("/debug") + " when something feels wrong. It now points you to ragtag.log for deeper diagnostics.\n")
+		sb.WriteString("• If agent mode feels too eager or too broad, inspect " + cmdStyle.Render("/tools") + " and disable context expansion or search temporarily.\n")
+		sb.WriteString("• " + cmdStyle.Render("/clear") + " only clears the visible TUI conversation. It does not delete indexed chats or raw files.\n")
+	case "models":
+		sb.WriteString(titleStyle.Render("Help · Models & Retrieval") + "\n\n")
+		sb.WriteString("Default model: " + cmdStyle.Render("openai/gpt-oss-120b") + "\n")
+		sb.WriteString("Default window: " + cmdStyle.Render("10") + "\n\n")
+		sb.WriteString(sectionStyle.Render("Model picking") + "\n")
+		for i, mdl := range allModels {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", cmdStyle.Render(fmt.Sprintf("[%2d]", i+1)), mdl))
+		}
+		sb.WriteString("\n" + sectionStyle.Render("How retrieval knobs interact") + "\n")
+		sb.WriteString("  " + cmdStyle.Render("/window") + " changes how much surrounding chat is attached to each hit.\n")
+		sb.WriteString("  " + cmdStyle.Render("/k") + " changes how many final chunks survive reranking.\n")
+		sb.WriteString("  " + cmdStyle.Render("/minresults") + " keeps a minimum number of results even when filtering is harsh.\n")
+		sb.WriteString("  " + cmdStyle.Render("/threshold") + " discards low-score results when you want cleaner context.\n")
 	}
-	for _, c := range cmds {
-		sb.WriteString(fmt.Sprintf("  %-20s %s\n", cmdStyle.Render(c[0]), dimStyle.Render(c[1])))
-	}
-
-	sb.WriteString("\n" + sectionStyle.Render("Hotkeys") + "\n")
-	hotkeys := [][2]string{
-		{"Ctrl+C / Ctrl+Q", "quit"},
-		{"ESC", "close overlay / clear input"},
-		{"PgUp / PgDn", "scroll (also ↑↓ in pagers)"},
-		{"Tab", "autocomplete command"},
-		{"↑↓", "cycle autocomplete / navigate menus"},
-	}
-	for _, h := range hotkeys {
-		sb.WriteString(fmt.Sprintf("  %-20s %s\n", cmdStyle.Render(h[0]), dimStyle.Render(h[1])))
-	}
-
-	sb.WriteString("\n" + sectionStyle.Render("Models") + "\n")
-	sb.WriteString(dimStyle.Render(modelList.String()))
-
+	sb.WriteString("\n" + dimStyle.Render("Esc: back to categories"))
 	return sb.String()
 }
 
@@ -4341,13 +4421,90 @@ func (m *AppModel) openRagBrowser() {
 	}
 	m.ragBrowseCursor = 0
 	m.ragBrowseCtxOpen = false
-	vpH := m.height - 8 // full-screen minus borders/status
-	if vpH < 5 {
-		vpH = 5
-	}
-	m.ragBrowseVP = viewport.New(m.width-4, vpH)
-	m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+	m.resizeRagBrowserViewports()
+	m.ragBrowseVP.GotoTop()
 	m.screen = ScreenRagBrowser
+}
+
+func (m *AppModel) resizeRagBrowserViewports() {
+	listH := m.height - 8
+	if listH < 5 {
+		listH = 5
+	}
+	ctxH := m.height - 10
+	if ctxH < 5 {
+		ctxH = 5
+	}
+	m.ragBrowseVP.Width = m.width - 6
+	m.ragBrowseVP.Height = listH
+	m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+	m.ensureRagBrowseCursorVisible()
+
+	m.ragBrowseCtxVP.Width = m.width - 8
+	m.ragBrowseCtxVP.Height = ctxH
+	if m.ragBrowseCtxOpen {
+		m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
+	}
+}
+
+func (m AppModel) ragBrowseCardHeight(r workers.Result) int {
+	cardWidth := m.width - 6
+	if cardWidth < 52 {
+		cardWidth = 52
+	}
+	innerWidth := cardWidth - 6
+	text := strings.Join(strings.Fields(r.Chunk.Text), " ")
+	maxLen := innerWidth * 4
+	if maxLen < 80 {
+		maxLen = 80
+	}
+	if len(text) > maxLen {
+		text = text[:maxLen] + "…"
+	}
+	runes := []rune(text)
+	lines := 0
+	for len(runes) > innerWidth {
+		cut := innerWidth
+		for cut > 0 && runes[cut] != ' ' {
+			cut--
+		}
+		if cut == 0 {
+			cut = innerWidth
+		}
+		lines++
+		runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
+	}
+	if len(runes) > 0 {
+		lines++
+	}
+	if lines == 0 {
+		lines = 1
+	}
+	return lines + 4 // meta + separator + borders
+}
+
+func (m AppModel) ragBrowseCardOffset(idx int) int {
+	offset := 0
+	for i := 0; i < idx && i < len(m.ragBrowseChunks); i++ {
+		offset += m.ragBrowseCardHeight(m.ragBrowseChunks[i]) + 1
+	}
+	return offset
+}
+
+func (m *AppModel) ensureRagBrowseCursorVisible() {
+	if m.ragBrowseCursor < 0 || m.ragBrowseCursor >= len(m.ragBrowseChunks) {
+		return
+	}
+	top := m.ragBrowseCardOffset(m.ragBrowseCursor)
+	bottom := top + m.ragBrowseCardHeight(m.ragBrowseChunks[m.ragBrowseCursor])
+	if top < m.ragBrowseVP.YOffset {
+		m.ragBrowseVP.YOffset = top
+	} else if bottom > m.ragBrowseVP.YOffset+m.ragBrowseVP.Height {
+		m.ragBrowseVP.YOffset = bottom - m.ragBrowseVP.Height
+	}
+	if m.ragBrowseVP.YOffset < 0 {
+		m.ragBrowseVP.YOffset = 0
+	}
 }
 
 func (m *AppModel) renderRagBrowserList() string {
@@ -4462,21 +4619,48 @@ func (m *AppModel) renderRagBrowserCtx() string {
 	title := titleStyle.Render(fmt.Sprintf("Context window — chunk #%d", m.ragBrowseCursor+1))
 	lines = append(lines, title)
 	lines = append(lines, dimStyle.Render(strings.Repeat("─", innerWidth)))
+	lines = append(lines, titleStyle.Render("Main match"))
 
-	if len(r.ContextWindow) == 0 {
-		// Fall back to the chunk itself.
-		lines = append(lines, textStyle.Render(r.Chunk.Text))
-	} else {
-		for _, c := range r.ContextWindow {
-			ts := c.TimestampStart
-			if len(ts) > 19 {
-				ts = ts[:19]
-			}
-			prefix := userStyle.Render(c.Sender) + "  " + tsStyle.Render(ts) + "  "
-			lines = append(lines, prefix+textStyle.Render(c.Text))
+	mainPrefix := userStyle.Render(r.Chunk.Sender) + "  " + tsStyle.Render(trimBrowserTimestamp(r.Chunk.TimestampStart)) + "  "
+	for i, line := range wrapText(r.Chunk.Text, max(20, innerWidth-len([]rune(r.Chunk.Sender))-22)) {
+		if i == 0 {
+			lines = append(lines, mainPrefix+textStyle.Render(line))
+		} else {
+			lines = append(lines, strings.Repeat(" ", max(0, lipgloss.Width(mainPrefix)))+textStyle.Render(line))
 		}
 	}
+
+	var contextRows []string
+	for _, c := range r.ContextWindow {
+		if c.ChunkID == r.Chunk.ChunkID {
+			continue
+		}
+		prefix := userStyle.Render(c.Sender) + "  " + tsStyle.Render(trimBrowserTimestamp(c.TimestampStart)) + "  "
+		wrapped := wrapText(c.Text, max(20, innerWidth-lipgloss.Width(prefix)))
+		for i, line := range wrapped {
+			if i == 0 {
+				contextRows = append(contextRows, prefix+textStyle.Render(line))
+			} else {
+				contextRows = append(contextRows, strings.Repeat(" ", max(0, lipgloss.Width(prefix)))+textStyle.Render(line))
+			}
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, titleStyle.Render("Surrounding context"))
+	if len(contextRows) == 0 {
+		lines = append(lines, dimStyle.Render("(no surrounding context available)"))
+	} else {
+		lines = append(lines, contextRows...)
+	}
 	return strings.Join(lines, "\n")
+}
+
+func trimBrowserTimestamp(ts string) string {
+	if len(ts) > 19 {
+		return ts[:19]
+	}
+	return ts
 }
 
 func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
@@ -4495,6 +4679,7 @@ func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
 			if m.ragBrowseCursor > 0 {
 				m.ragBrowseCursor--
 				m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+				m.ensureRagBrowseCursorVisible()
 			}
 		}
 	case tea.KeyDown:
@@ -4504,6 +4689,7 @@ func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
 			if m.ragBrowseCursor < len(m.ragBrowseChunks)-1 {
 				m.ragBrowseCursor++
 				m.ragBrowseVP.SetContent(m.renderRagBrowserList())
+				m.ensureRagBrowseCursorVisible()
 			}
 		}
 	case tea.KeyPgUp:
@@ -4520,11 +4706,7 @@ func (m *AppModel) handleRagBrowserKey(msg tea.KeyMsg) []tea.Cmd {
 		}
 	case tea.KeyEnter:
 		if !m.ragBrowseCtxOpen && m.ragBrowseCursor < len(m.ragBrowseChunks) {
-			vpH := m.height - 10
-			if vpH < 5 {
-				vpH = 5
-			}
-			m.ragBrowseCtxVP = viewport.New(m.width-6, vpH)
+			m.ragBrowseCtxVP = viewport.New(m.width-8, max(5, m.height-10))
 			m.ragBrowseCtxVP.SetContent(m.renderRagBrowserCtx())
 			m.ragBrowseCtxVP.GotoTop()
 			m.ragBrowseCtxOpen = true
@@ -4555,5 +4737,6 @@ func (m AppModel) viewRagBrowserContent() string {
 		BorderForeground(ui.ColorCyan).
 		Padding(0, 1).
 		Width(m.width - 2).
+		Height(max(6, m.height-4)).
 		Render(inner)
 }

@@ -31,7 +31,7 @@ var defaults = Settings{
 	NIMAPIKey:       "",
 	NIMBaseURL:      "https://integrate.api.nvidia.com/v1",
 	HFToken:         "",
-	NIMModel:        "meta/llama-3.3-70b-instruct",
+	NIMModel:        "openai/gpt-oss-120b",
 	Temperature:     0.2,
 	TopP:            0.7,
 	MaxTokens:       1024,
@@ -196,7 +196,7 @@ type TUIState struct {
 // LoadTUIState reads the JSON state file. Returns sensible defaults on any error.
 func LoadTUIState(path string) TUIState {
 	s := TUIState{
-		Window:           5,
+		Window:           10,
 		AgentToolSearch:  true,
 		AgentToolContext: true,
 	}
@@ -206,7 +206,7 @@ func LoadTUIState(path string) TUIState {
 	}
 	_ = json.Unmarshal(data, &s)
 	if s.Window == 0 {
-		s.Window = 5
+		s.Window = 10
 	}
 	return s
 }
