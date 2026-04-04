@@ -2122,21 +2122,20 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 		m.addMessage(ChatMessage{Role: "system", Content: notice})
 
 		// Format results as a readable table.
-		keyStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan)
 		valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 		dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 		starStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
 		rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
 
 		var sb strings.Builder
-		sb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s", "#", "score", "★", "src", "timestamp")) + "\n")
+		sb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s  %s", "#", "score", "★", "src", "timestamp", "text")) + "\n")
 		sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
-		for _, r := range m.streamSources {
+		for i, r := range m.streamSources {
 			score := r.RerankScore
 			if score == 0 {
 				score = r.Score
 			}
-			star := dimStyle.Render("·")
+			star := " "
 			if r.KeywordBoosted {
 				star = starStyle.Render("★")
 			}
@@ -2157,11 +2156,10 @@ func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 				text = text[:maxText] + "…"
 			}
 			sb.WriteString(
-				rankStyle.Render(fmt.Sprintf("  %2d", r.Rank)) +
-					keyStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
+				rankStyle.Render(fmt.Sprintf("  %2d", i+1)) +
+					valStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
 					star +
-					valStyle.Render(fmt.Sprintf("  %-8s %-19s", src, ts)) + "\n" +
-					"      " + valStyle.Render(text) + "\n",
+					valStyle.Render(fmt.Sprintf("  %-8s %-19s  %s", src, ts, text)) + "\n",
 			)
 		}
 		m.appState = StateIdle
