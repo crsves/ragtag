@@ -19,3 +19,4 @@ ragtag/rag-tui
 discard/
 .DS_Store
 CHANGES.md
+.venv/
