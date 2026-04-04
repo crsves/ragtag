@@ -2115,53 +2115,117 @@ func (m *AppModel) resetAgentState() {
 func (m *AppModel) startStreamingCmd(retrievedContext string) []tea.Cmd {
 	// RAG-only mode: if no API key is configured, skip LLM and show chunks directly.
 	if m.settings.NIMAPIKey == "" || m.tuiState.RAGOnly {
-		notice := "no API key set — showing retrieved chunks"
+		// ── styles ──────────────────────────────────────────────────────────
+		accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+		dimStyle    := lipgloss.NewStyle().Foreground(ui.ColorDim)
+		rankStyle   := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+		scoreStyle  := lipgloss.NewStyle().Foreground(ui.ColorCyan)
+		starStyle   := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+		srcStyle    := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+		textStyle   := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+
+		// ── header notice ───────────────────────────────────────────────────
+		label := "NO API KEY"
 		if m.tuiState.RAGOnly {
-			notice = "RAG-only mode — showing retrieved chunks"
+			label = "RAG-ONLY MODE"
 		}
+		n := len(m.streamSources)
+		chunkWord := "chunk"
+		if n != 1 {
+			chunkWord = "chunks"
+		}
+		notice := accentStyle.Render("◆ "+label) +
+			dimStyle.Render(fmt.Sprintf("  %d %s retrieved", n, chunkWord))
 		m.addMessage(ChatMessage{Role: "system", Content: notice})
 
-		// Format results as a readable table.
-		valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
-		dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
-		starStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
-		rankStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+		// ── card layout ─────────────────────────────────────────────────────
+		cardWidth := m.width - 4
+		if cardWidth < 52 {
+			cardWidth = 52
+		}
+		// inner content width = cardWidth - 2 (borders) - 2 (padding each side)
+		innerWidth := cardWidth - 6
 
 		var sb strings.Builder
-		sb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s  %s", "#", "score", "★", "src", "timestamp", "text")) + "\n")
-		sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
 		for i, r := range m.streamSources {
 			score := r.RerankScore
 			if score == 0 {
 				score = r.Score
 			}
-			star := " "
+
+			// score bar
+			const barLen = 10
+			filled := int(score * float64(barLen))
+			if filled > barLen {
+				filled = barLen
+			}
+			bar := scoreStyle.Render(strings.Repeat("█", filled)) +
+				dimStyle.Render(strings.Repeat("░", barLen-filled))
+
+			star := dimStyle.Render("·")
 			if r.KeywordBoosted {
 				star = starStyle.Render("★")
 			}
+
 			ts := r.Chunk.TimestampStart
 			if len(ts) > 19 {
 				ts = ts[:19]
 			}
-			src := r.Source
-			if len(src) > 7 {
-				src = src[:7]
+
+			// metadata line: #1  ██████░░░░  0.8234  ★  source  timestamp
+			meta := rankStyle.Render(fmt.Sprintf("#%-2d", i+1)) + "  " +
+				bar + "  " +
+				scoreStyle.Render(fmt.Sprintf("%.4f", score)) + "  " +
+				star + "  " +
+				srcStyle.Render(r.Source) + "  " +
+				dimStyle.Render(ts)
+
+			// text: collapse newlines, wrap to innerWidth, max 4 lines
+			text := strings.Join(strings.Fields(r.Chunk.Text), " ")
+			maxLen := innerWidth * 4
+			if maxLen < 80 {
+				maxLen = 80
 			}
-			text := r.Chunk.Text
-			maxText := m.width - 50
-			if maxText < 30 {
-				maxText = 30
+			if len(text) > maxLen {
+				text = text[:maxLen] + "…"
 			}
-			if len(text) > maxText {
-				text = text[:maxText] + "…"
+			runes := []rune(text)
+			var lines []string
+			for len(runes) > innerWidth {
+				cut := innerWidth
+				for cut > 0 && runes[cut] != ' ' {
+					cut--
+				}
+				if cut == 0 {
+					cut = innerWidth
+				}
+				lines = append(lines, string(runes[:cut]))
+				runes = []rune(strings.TrimLeft(string(runes[cut:]), " "))
 			}
-			sb.WriteString(
-				rankStyle.Render(fmt.Sprintf("  %2d", i+1)) +
-					valStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
-					star +
-					valStyle.Render(fmt.Sprintf("  %-8s %-19s  %s", src, ts, text)) + "\n",
-			)
+			if len(runes) > 0 {
+				lines = append(lines, string(runes))
+			}
+
+			sep  := dimStyle.Render(strings.Repeat("─", innerWidth))
+			body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
+
+			borderColor := ui.ColorDim
+			if i == 0 {
+				borderColor = ui.ColorCyan
+			}
+			card := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(borderColor).
+				Padding(0, 1).
+				Width(cardWidth).
+				Render(body)
+
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(card)
 		}
+
 		m.appState = StateIdle
 		m.addMessage(ChatMessage{
 			Role:    "assistant",
