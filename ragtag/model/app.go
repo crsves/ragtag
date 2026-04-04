@@ -734,9 +734,15 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AgentLLMDoneMsg:
 		workers.Logf(m.ragDir, "agent llm done action=%s payload=%q rawChars=%d", msg.Action, msg.Payload, len(msg.Raw))
 		if m.tuiState.Debug && strings.TrimSpace(msg.Raw) != "" {
+			raw := strings.TrimSpace(msg.Raw)
+			barStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+			var rawLines []string
+			for _, line := range strings.Split(raw, "\n") {
+				rawLines = append(rawLines, barStyle.Render("  │ ")+line)
+			}
 			m.addMessage(ChatMessage{
 				Role:        "system",
-				Content:     "debug · agent llm\n" + renderCodeBlockCard("text", strings.TrimSpace(msg.Raw), max(50, m.width-4)),
+				Content:     "debug · agent llm\n" + strings.Join(rawLines, "\n"),
 				Prerendered: true,
 			})
 		}
@@ -3128,7 +3134,10 @@ func (m AppModel) renderStatusBar() string {
 		parts = append(parts, ingestPill)
 	}
 
-	bar := strings.Join(parts, "  ")
+	// Join with a separator that explicitly carries the bar background colour so
+	// the gap between active-flag pills doesn't fall back to the terminal default.
+	barSep := lipgloss.NewStyle().Background(ui.ColorDim).Render("  ")
+	bar := strings.Join(parts, barSep)
 
 	// Update badge — right-aligned, shown when a newer version is available.
 	if m.updateAvailable != "" {
@@ -3144,6 +3153,17 @@ func (m AppModel) renderStatusBar() string {
 			bar = bar + strings.Repeat(" ", m.width-barWidth-badgeWidth) + badge
 		} else {
 			bar = bar + "  " + badge
+		}
+	}
+
+	// Version badge — far right of status bar, debug mode on main chat screen only.
+	if m.tuiState.Debug && m.screen == ScreenChat {
+		verBadge := lipgloss.NewStyle().Foreground(ui.ColorDim).Faint(true).Render(AppVersion)
+		barNaturalWidth := lipgloss.Width(bar)
+		verW := lipgloss.Width(verBadge)
+		padding := m.width - barNaturalWidth - verW - 2 // -2 for status bar padding
+		if padding > 0 {
+			bar = bar + strings.Repeat(" ", padding) + verBadge
 		}
 	}
 
