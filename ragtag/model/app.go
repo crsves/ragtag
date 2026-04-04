@@ -723,7 +723,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sb.WriteString(keyStyle.Render("  candidates") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.TotalCandidates)) +
 					"   " + keyStyle.Render("reranked") + dimStyle.Render(" → ") + valStyle.Render(fmt.Sprintf("top %d", ds.Reranked)) + "\n")
 			}
-			m.addMessage(ChatMessage{Role: "system", Content: "debug · agent retrieval stats\n" + sb.String()})
+			m.addMessage(ChatMessage{Role: "system", Content: "debug · agent retrieval stats\n" + sb.String(), Prerendered: true})
 		}
 
 		if msg.NumResults == 0 || msg.TopScore < 0.5 {
@@ -849,8 +849,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil && isNewerVersion(AppVersion, msg.Latest) {
 			m.updateAvailable = msg.Latest
 			m.updateChangelog = msg.Changelog
-			// Show startup clarify prompt once (only when on splash / StateStarting).
-			if !m.startupUpdateShown {
+			// Show startup clarify prompt once, but only when the app is idle
+			// (not during agentic mode or streaming — would interrupt the flow).
+			if !m.startupUpdateShown && m.appState == StateIdle {
 				m.startupUpdateShown = true
 				question := fmt.Sprintf("ragtag %s is available (you have %s). Update now?", msg.Latest, AppVersion)
 				if msg.Changelog != "" {
@@ -2297,7 +2298,12 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 	confident := m.tuiState.Confident
 	cfg := m.settings.ToLLMConfig()
 
-	return func() tea.Msg {
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[agent panic: %v]", r)}
+			}
+		}()
 		system := buildAgentSystemPrompt(confident, maxSteps, len(searches))
 
 		var remaining string
@@ -3270,7 +3276,15 @@ func waitForTokenCmd(tokenCh <-chan string, errCh <-chan error) tea.Cmd {
 }
 
 func agentRetrievalCmd(bridge *workers.Bridge, query string, k, window int, debug bool, minResults int, scoreThreshold float64) tea.Cmd {
-	return func() tea.Msg {
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = AgentRetrievalDoneMsg{Query: query, Err: fmt.Errorf("panic in retrieval: %v", r)}
+			}
+		}()
+		if bridge == nil {
+			return AgentRetrievalDoneMsg{Query: query, Err: fmt.Errorf("bridge not initialised")}
+		}
 		results, chunkText, stats, err := bridge.Retrieve(query, k, window, debug, minResults, scoreThreshold)
 		if err != nil {
 			return AgentRetrievalDoneMsg{Query: query, Err: err}

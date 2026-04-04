@@ -142,7 +142,13 @@ func NewBridge(ragDir string) (*Bridge, error) {
 		cmd = exec.Command(py, "bridge.py")
 	}
 	cmd.Dir = ragDir
-	cmd.Stderr = io.Discard // prevent bridge subprocess output from corrupting TUI
+	// Redirect bridge stderr to a log file for debugging; use io.Discard fallback.
+	logPath := filepath.Join(ragDir, "bridge_stderr.log")
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		cmd.Stderr = f
+	} else {
+		cmd.Stderr = io.Discard
+	}
 	setProcAttr(cmd)
 
 	stdin, err := cmd.StdinPipe()
