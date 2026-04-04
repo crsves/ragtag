@@ -34,5 +34,22 @@ jobs:
           git push origin :refs/tags/latest 2>/dev/null || true
           gh release create latest bin/* \
             --title "Latest" \
-            --notes "Built from \$(git rev-parse --short HEAD)" \
+            --notes "Built from $(git rev-parse --short HEAD)" \
             --latest
+
+      - name: Deploy to mirror
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 600 /dev/null /tmp/deploy_key
+          echo "$DEPLOY_SSH_KEY" > /tmp/deploy_key
+          scp -i /tmp/deploy_key \
+            -P 6767 \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            bin/ragtag-linux-amd64 \
+            bin/ragtag-linux-arm64 \
+            bin/ragtag-mac-arm64 \
+            bin/ragtag-mac-intel \
+            alkaline@upload.peeing.pics:ragtag/rag-tui/
+          rm -f /tmp/deploy_key
