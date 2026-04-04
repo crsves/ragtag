@@ -17,14 +17,29 @@ jobs:
         with:
           go-version: '1.24'
 
+      - name: Read version
+        id: ver
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_OUTPUT
+
       - name: Build binaries
         working-directory: ragtag
         run: |
+          VERSION="${{ steps.ver.outputs.VERSION }}"
+          LDFLAGS="-X github.com/emirate/rag-tui/model.AppVersion=${VERSION}"
           mkdir -p ../bin
-          GOOS=linux   GOARCH=amd64 go build -buildvcs=false -o ../bin/ragtag-linux-amd64  .
-          GOOS=linux   GOARCH=arm64 go build -buildvcs=false -o ../bin/ragtag-linux-arm64  .
-          GOOS=darwin  GOARCH=arm64 go build -buildvcs=false -o ../bin/ragtag-mac-arm64    .
-          GOOS=darwin  GOARCH=amd64 go build -buildvcs=false -o ../bin/ragtag-mac-intel    .
+          GOOS=linux   GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-linux-amd64  .
+          GOOS=linux   GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-linux-arm64  .
+          GOOS=darwin  GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-mac-arm64    .
+          GOOS=darwin  GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-mac-intel    .
+
+      - name: Generate version JSON
+        run: |
+          VERSION="${{ steps.ver.outputs.VERSION }}"
+          COMMIT=$(git rev-parse --short HEAD)
+          # Get the first line of the last commit message as changelog
+          CHANGELOG=$(git log -1 --format='%s' | head -c 100)
+          printf '{"version":"%s","commit":"%s","changelog":"%s"}\n' \
+            "$VERSION" "$COMMIT" "$CHANGELOG" > bin/latest_version.json
 
       - name: Publish release
         env:
@@ -33,8 +48,8 @@ jobs:
           gh release delete latest --yes 2>/dev/null || true
           git push origin :refs/tags/latest 2>/dev/null || true
           gh release create latest bin/* \
-            --title "Latest" \
-            --notes "Built from $(git rev-parse --short HEAD)" \
+            --title "Latest (${{ steps.ver.outputs.VERSION }})" \
+            --notes "Built from $(git rev-parse --short HEAD) — ${{ steps.ver.outputs.VERSION }}" \
             --latest
 
       - name: Deploy to mirror
@@ -51,5 +66,7 @@ jobs:
             bin/ragtag-linux-arm64 \
             bin/ragtag-mac-arm64 \
             bin/ragtag-mac-intel \
+            bin/latest_version.json \
             alkaline@upload.peeing.pics:ragtag/rag-tui/
           rm -f /tmp/deploy_key
+

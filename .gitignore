@@ -20,3 +20,4 @@ discard/
 .DS_Store
 CHANGES.md
 .venv/
+ragtag-mac-arm64

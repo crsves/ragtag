@@ -16,6 +16,7 @@ import (
 const (
 	ClarifyKindLLM     = "llm"     // re-runs the pipeline with clarification context
 	ClarifyKindRestart = "restart" // restarts the binary after /update
+	ClarifyKindUpdate  = "update"  // startup update notification prompt
 )
 
 type ClarifyOption struct {
@@ -225,6 +226,12 @@ func (m *AppModel) submitClarifyAnswer(id, label string) []tea.Cmd {
 			cmds = append(cmds, tea.Quit)
 		}
 		// "no" → just dismiss (already done above)
+
+	case ClarifyKindUpdate:
+		if id == "yes" {
+			m.addMessage(ChatMessage{Role: "system", Content: "Updating ragtag…"})
+			cmds = append(cmds, selfUpdateCmd())
+		}
 
 	case ClarifyKindLLM:
 		// Re-run retrieval+LLM with original query appended with the clarification.

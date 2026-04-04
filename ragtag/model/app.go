@@ -303,6 +303,11 @@ type AppModel struct {
 	// Clarify overlay (shown above input row)
 	clarify ClarifyState
 
+	// Update notification
+	updateAvailable string // non-empty when a newer version exists
+	updateChangelog  string
+	startupUpdateShown bool // true once the startup update clarify has been shown
+
 	// Autocomplete
 	acSuggestions []cmdSuggestion
 	acSelected    int
@@ -483,10 +488,12 @@ func waitForBridgeCmd(b *workers.Bridge) tea.Cmd {
 // ─── Init ────────────────────────────────────────────────────────────────────
 
 func (m AppModel) Init() tea.Cmd {
+	// Fire version check in the background at startup.
+	versionCheck := checkVersionCmd()
 	if m.bridge == nil {
-		return tea.Batch(m.spinner.Tick, animTickCmd())
+		return tea.Batch(m.spinner.Tick, animTickCmd(), versionCheck)
 	}
-	return tea.Batch(m.spinner.Tick, animTickCmd(), waitForBridgeCmd(m.bridge))
+	return tea.Batch(m.spinner.Tick, animTickCmd(), waitForBridgeCmd(m.bridge), versionCheck)
 }
 
 // ─── Update ──────────────────────────────────────────────────────────────────
@@ -837,7 +844,31 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-
+	// ── Version check ──────────────────────────────────────────────────────
+	case VersionCheckMsg:
+		if msg.Err == nil && isNewerVersion(AppVersion, msg.Latest) {
+			m.updateAvailable = msg.Latest
+			m.updateChangelog = msg.Changelog
+			// Show startup clarify prompt once (only when on splash / StateStarting).
+			if !m.startupUpdateShown {
+				m.startupUpdateShown = true
+				question := fmt.Sprintf("ragtag %s is available (you have %s). Update now?", msg.Latest, AppVersion)
+				if msg.Changelog != "" {
+					question = fmt.Sprintf("ragtag %s is available — %s. Update now?", msg.Latest, msg.Changelog)
+				}
+				m.clarify = ClarifyState{
+					Active:           true,
+					Kind:             ClarifyKindUpdate,
+					Question:         question,
+					Options: []ClarifyOption{
+						{ID: "yes", Label: "Update now  (/update)"},
+						{ID: "no",  Label: "Later"},
+					},
+					Cursor:           0,
+					SuggestedDefault: "yes",
+				}
+			}
+		}
 
 	// ── Chat file loaded ───────────────────────────────────────────────────
 	case ChatFileLoadedMsg:
@@ -1239,18 +1270,20 @@ func (m *AppModel) handleAPISettingsKey(msg tea.KeyMsg) []tea.Cmd {
 }
 
 func (m *AppModel) applyAPISettingsEdit() {
-        switch m.apiSettingsEditing {
-        case "api_key":
-                if v := strings.TrimSpace(m.apiSettingsInput); v != "" {
-                        m.settings.NIMAPIKey = v
-                        _ = m.settings.Save()
-                }
-        case "base_url":
-                if v := strings.TrimSpace(m.apiSettingsInput); v != "" {
-                        m.settings.NIMBaseURL = v
-                        _ = m.settings.Save()
-                }
-        }
+	switch m.apiSettingsEditing {
+	case "api_key":
+		if v := strings.TrimSpace(m.apiSettingsInput); v != "" {
+			// Strip accidental surrounding brackets (common paste artifact).
+			v = strings.Trim(v, "[]")
+			m.settings.NIMAPIKey = v
+			_ = m.settings.Save()
+		}
+	case "base_url":
+		if v := strings.TrimSpace(m.apiSettingsInput); v != "" {
+			m.settings.NIMBaseURL = v
+			_ = m.settings.Save()
+		}
+	}
 }
 
 func (m AppModel) viewAPISettingsContent() string {
@@ -2776,6 +2809,24 @@ func (m AppModel) renderStatusBar() string {
 	}
 
 	bar := strings.Join(parts, "  ")
+
+	// Update badge — right-aligned, shown when a newer version is available.
+	if m.updateAvailable != "" {
+		badge := lipgloss.NewStyle().
+			Foreground(ui.ColorYellow).Bold(true).
+			Render(fmt.Sprintf("↑ %s available · /update", m.updateAvailable))
+		// Pad bar to fill width, then append badge on the right.
+		barPlain := lipgloss.NewStyle().Width(m.width).Render(bar)
+		barWidth := lipgloss.Width(barPlain)
+		badgeWidth := lipgloss.Width(badge)
+		if barWidth+badgeWidth+2 <= m.width {
+			// Fit on same line
+			bar = bar + strings.Repeat(" ", m.width-barWidth-badgeWidth) + badge
+		} else {
+			bar = bar + "  " + badge
+		}
+	}
+
 	return ui.StatusBarStyle.Width(m.width).Render(bar)
 }
 
