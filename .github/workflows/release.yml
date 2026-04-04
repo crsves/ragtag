@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,22 +21,78 @@ jobs:
         id: ver
         run: echo "VERSION=$(cat VERSION)" >> $GITHUB_OUTPUT
 
-      - name: Build binaries
+      - name: Build Linux binaries
         working-directory: ragtag
         run: |
           VERSION="${{ steps.ver.outputs.VERSION }}"
           LDFLAGS="-X github.com/emirate/rag-tui/model.AppVersion=${VERSION}"
           mkdir -p ../bin
-          GOOS=linux   GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-linux-amd64  .
-          GOOS=linux   GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-linux-arm64  .
-          GOOS=darwin  GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-mac-arm64    .
-          GOOS=darwin  GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-mac-intel    .
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-linux-arm64 .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bins
+          path: bin/
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Read version
+        id: ver
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Build macOS binaries
+        working-directory: ragtag
+        run: |
+          VERSION="${{ steps.ver.outputs.VERSION }}"
+          LDFLAGS="-X github.com/emirate/rag-tui/model.AppVersion=${VERSION}"
+          mkdir -p ../bin
+          GOOS=darwin GOARCH=arm64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-mac-arm64 .
+          GOOS=darwin GOARCH=amd64 go build -buildvcs=false -ldflags="$LDFLAGS" -o ../bin/ragtag-mac-intel .
+
+      - name: Ad-hoc code sign macOS binaries
+        run: |
+          codesign --force --sign - bin/ragtag-mac-arm64
+          codesign --force --sign - bin/ragtag-mac-intel
+          codesign -dv bin/ragtag-mac-arm64
+          codesign -dv bin/ragtag-mac-intel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-bins
+          path: bin/
+
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: echo "VERSION=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bins
+          path: bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-bins
+          path: bin/
 
       - name: Generate version JSON
         run: |
           VERSION="${{ steps.ver.outputs.VERSION }}"
           COMMIT=$(git rev-parse --short HEAD)
-          # Get the first line of the last commit message as changelog
           CHANGELOG=$(git log -1 --format='%s' | head -c 100)
           printf '{"version":"%s","commit":"%s","changelog":"%s"}\n' \
             "$VERSION" "$COMMIT" "$CHANGELOG" > bin/latest_version.json

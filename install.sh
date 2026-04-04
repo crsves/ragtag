@@ -233,6 +233,15 @@ _unquarantine() {
     fi
 }
 
+# Apply ad-hoc code signature on macOS — required on macOS 26+ (beta) to prevent
+# taskgated from killing unsigned binaries with SIGKILL (Code Signature Invalid)
+_codesign() {
+    local f="$1"
+    if command -v codesign &>/dev/null; then
+        codesign --force --sign - "$f" 2>/dev/null || true
+    fi
+}
+
 download_release_python_sources() {
     local base_raw="https://raw.githubusercontent.com/${REPO}/main"
     local files=(
@@ -756,6 +765,7 @@ do_release() {
             stop_spinner
             chmod +x "$tui_dest"
             _unquarantine "$tui_dest"
+            _codesign "$tui_dest"
             local sz; sz="$(du -sh "$tui_dest" 2>/dev/null | cut -f1)"
             local spd="${DOWNLOAD_SPEED_MBPS:-}"
             [[ -n "$spd" ]] && spd="  ${DIM}${spd} MB/s${RESET}" || spd=""
@@ -776,6 +786,7 @@ do_release() {
         stop_spinner
         chmod +x "${RAGTAG_DIR}/pipeline"
         _unquarantine "${RAGTAG_DIR}/pipeline"
+        _codesign "${RAGTAG_DIR}/pipeline"
         local sz; sz="$(du -sh "${RAGTAG_DIR}/pipeline" 2>/dev/null | cut -f1)"
         local spd="${DOWNLOAD_SPEED_MBPS:-}"
         [[ -n "$spd" ]] && spd="  ${DIM}${spd} MB/s${RESET}" || spd=""
@@ -792,6 +803,7 @@ do_release() {
         stop_spinner
         chmod +x "${RAGTAG_DIR}/bridge"
         _unquarantine "${RAGTAG_DIR}/bridge"
+        _codesign "${RAGTAG_DIR}/bridge"
         local sz; sz="$(du -sh "${RAGTAG_DIR}/bridge" 2>/dev/null | cut -f1)"
         local spd="${DOWNLOAD_SPEED_MBPS:-}"
         [[ -n "$spd" ]] && spd="  ${DIM}${spd} MB/s${RESET}" || spd=""
