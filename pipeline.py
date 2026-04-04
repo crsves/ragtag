@@ -1,6 +1,11 @@
 """
 Complete RAG Pipeline - Run all steps in sequence
 """
+import os
+# Prevent FAISS/libomp multi-runtime race on macOS arm64.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import json
 from pathlib import Path
 from normalize import normalize_messages
@@ -14,6 +19,7 @@ def build_rag_system(
     messages_per_chunk: int = 1,
     model_name: str = 'all-MiniLM-L6-v2',
     output_dir: str = 'processed',
+    progress_cb=None,
 ):
     """
     Build complete RAG system from raw JSON.
@@ -23,7 +29,12 @@ def build_rag_system(
         messages_per_chunk: Chunking strategy (1 = one message per chunk)
         model_name: Embedding model to use
         output_dir: Root directory for all processed output (default: 'processed')
+        progress_cb: Optional callable(pct: int, msg: str) for progress reporting
     """
+    def _progress(pct, msg):
+        if progress_cb:
+            progress_cb(pct, msg)
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -33,17 +44,20 @@ def build_rag_system(
 
     # Step 1: Normalize
     print("\n[STEP 1/5] Normalizing messages...")
+    _progress(10, "Normalizing messages…")
     normalized = normalize_messages(input_file, str(out / 'normalized.json'))
     print(f"✓ Normalized {len(normalized)} messages")
 
     # Step 2: Chunk
     print("\n[STEP 2/5] Chunking messages...")
+    _progress(20, "Chunking messages…")
     chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)
     save_chunks(chunks, str(out / 'chunks.json'))
     print(f"✓ Created {len(chunks)} chunks")
 
     # Step 3: Generate embeddings
     print("\n[STEP 3/5] Generating embeddings...")
+    _progress(35, f"Generating embeddings for {len(chunks)} chunks…")
     generator = EmbeddingGenerator(model_name)
     embeddings = generator.embed_chunks(chunks)
     save_embeddings(embeddings, chunks, str(out / 'embeddings'))
@@ -51,6 +65,7 @@ def build_rag_system(
 
     # Step 4: Build vector store
     print("\n[STEP 4/5] Building vector store...")
+    _progress(85, "Building vector store…")
     store = VectorStore(embedding_dim=embeddings.shape[1])
     store.add(embeddings, chunks)
     store.save(str(out / 'vector_store'))
@@ -58,6 +73,7 @@ def build_rag_system(
 
     # Step 5: Summary
     print("\n[STEP 5/5] Summary")
+    _progress(95, "Finalizing…")
     print("="*80)
     print(f"✓ Input messages: {len(normalized)}")
     print(f"✓ Chunks created: {len(chunks)}")

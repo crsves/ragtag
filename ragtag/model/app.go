@@ -50,6 +50,13 @@ type StreamTokenMsg struct{ Token string }
 // StreamDoneMsg signals end of streaming (Err may be nil on success).
 type StreamDoneMsg struct{ Err error }
 
+// IngestProgressMsg carries a progress update from a running ingest operation.
+type IngestProgressMsg struct {
+	Pct     int
+	Message string
+	ch      chan workers.IngestProgress // closed when ingest completes
+}
+
 // AgentLLMDoneMsg carries the parsed action from one agentic LLM call.
 type AgentLLMDoneMsg struct {
 	Action  string // "SEARCH" or "ANSWER"
@@ -63,6 +70,7 @@ type AgentRetrievalDoneMsg struct {
 	NumResults int
 	TopScore   float64
 	ChunkText  string
+	Results    []workers.Result // full results for sources display
 	DebugStats *workers.DebugStats
 	Err        error
 }
@@ -368,6 +376,7 @@ type AppModel struct {
 	// Ingest progress
 	ingestInProgress bool
 	ingestFilename   string // base filename being ingested (for status bar)
+	ingestProgress   int    // 0-100 percentage, 0 means unknown/indeterminate
 	ingestNewSlug    string // derived slug for the switch-chat prompt
 
 	// Chat file viewer
@@ -647,44 +656,47 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addMessage(ChatMessage{Role: "system", Content: "debug · retrieval stats\n" + sb.String(), Prerendered: true})
 
-			// Results table — in debug mode show up to 10 with full detail.
-			limit := len(msg.Results)
-			if limit > 10 {
-				limit = 10
-			}
-			if limit > 0 {
-				var rb strings.Builder
-				rb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s  %s", "#", "score", "★", "src", "timestamp", "text")) + "\n")
-				rb.WriteString(dimStyle.Render("  "+strings.Repeat("─", 80)) + "\n")
-				for i, r := range msg.Results[:limit] {
-					score := r.RerankScore
-					if score == 0 {
-						score = r.Score
-					}
-					star := " "
-					if r.KeywordBoosted {
-						star = starStyle.Render("★")
-					}
-					src := r.Source
-					if len(src) > 7 {
-						src = src[:7]
-					}
-					ts := r.Chunk.TimestampStart
-					if len(ts) > 19 {
-						ts = ts[:19]
-					}
-					text := r.Chunk.Text
-					maxText := 55
-					if len(text) > maxText {
-						text = text[:maxText] + "…"
-					}
-					rb.WriteString(
-						rankStyle.Render(fmt.Sprintf("  %2d", i+1)) +
-							valStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
-							star +
-							valStyle.Render(fmt.Sprintf("  %-8s %-19s  %s", src, ts, text)) + "\n")
+			// Results table — only shown in debug mode when ShowSources is off;
+			// if sources are enabled, the per-answer source table covers this.
+			if !m.tuiState.ShowSources {
+				limit := len(msg.Results)
+				if limit > 10 {
+					limit = 10
 				}
-				m.addMessage(ChatMessage{Role: "system", Content: "debug · top results\n" + rb.String(), Prerendered: true})
+				if limit > 0 {
+					var rb strings.Builder
+					rb.WriteString(dimStyle.Render(fmt.Sprintf("  %-3s  %-7s  %-3s  %-8s  %-19s  %s", "#", "score", "★", "src", "timestamp", "text")) + "\n")
+					rb.WriteString(dimStyle.Render("  "+strings.Repeat("─", 80)) + "\n")
+					for i, r := range msg.Results[:limit] {
+						score := r.RerankScore
+						if score == 0 {
+							score = r.Score
+						}
+						star := " "
+						if r.KeywordBoosted {
+							star = starStyle.Render("★")
+						}
+						src := r.Source
+						if len(src) > 7 {
+							src = src[:7]
+						}
+						ts := r.Chunk.TimestampStart
+						if len(ts) > 19 {
+							ts = ts[:19]
+						}
+						text := r.Chunk.Text
+						maxText := 55
+						if len(text) > maxText {
+							text = text[:maxText] + "…"
+						}
+						rb.WriteString(
+							rankStyle.Render(fmt.Sprintf("  %2d", i+1)) +
+								valStyle.Render(fmt.Sprintf("  %7.4f  ", score)) +
+								star +
+								valStyle.Render(fmt.Sprintf("  %-8s %-19s  %s", src, ts, text)) + "\n")
+					}
+					m.addMessage(ChatMessage{Role: "system", Content: "debug · top results\n" + rb.String(), Prerendered: true})
+				}
 			}
 		}
 		cmds = append(cmds, m.startStreamingCmd(msg.Context)...)
@@ -733,18 +745,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Agentic LLM response ───────────────────────────────────────────────
 	case AgentLLMDoneMsg:
 		workers.Logf(m.ragDir, "agent llm done action=%s payload=%q rawChars=%d", msg.Action, msg.Payload, len(msg.Raw))
+		// In debug mode, only show LLM diagnostic when the action adds context
+		// not visible from the agentic_step messages (SEARCH queries are already
+		// shown; ANSWER content appears in the final assistant message).
 		if m.tuiState.Debug && strings.TrimSpace(msg.Raw) != "" {
-			raw := strings.TrimSpace(msg.Raw)
-			barStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
-			var rawLines []string
-			for _, line := range strings.Split(raw, "\n") {
-				rawLines = append(rawLines, barStyle.Render("  │ ")+line)
+			action := strings.ToUpper(strings.TrimSpace(msg.Action))
+			if action != "SEARCH" && action != "ANSWER" {
+				// Unrecognised LLM output — show raw for debugging.
+				barStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+				var rawLines []string
+				for _, line := range strings.Split(strings.TrimSpace(msg.Raw), "\n") {
+					rawLines = append(rawLines, barStyle.Render("  │ ")+line)
+				}
+				m.addMessage(ChatMessage{
+					Role:        "system",
+					Content:     "debug · agent llm (unrecognised)\n" + strings.Join(rawLines, "\n"),
+					Prerendered: true,
+				})
 			}
-			m.addMessage(ChatMessage{
-				Role:        "system",
-				Content:     "debug · agent llm\n" + strings.Join(rawLines, "\n"),
-				Prerendered: true,
-			})
 		}
 		switch strings.ToUpper(msg.Action) {
 		case "SEARCH":
@@ -772,6 +790,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content:     msg.Payload + searchInfo,
 				Searches:    m.agentSearches,
 				NumSearches: len(m.agentSearches),
+				Sources:     m.streamSources, // accumulated from all agent retrieval steps
 			})
 			if strings.HasPrefix(msg.Payload, "[LLM error:") {
 				m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("details logged to %s", filepath.Join(m.ragDir, "ragtag.log"))})
@@ -781,7 +800,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			// LLM didn't follow format — treat entire response as an answer.
 			m.appState = StateIdle
-			m.addMessage(ChatMessage{Role: "assistant", Content: msg.Payload})
+			m.addMessage(ChatMessage{Role: "assistant", Content: msg.Payload, Sources: m.streamSources})
 			m.resetAgentState()
 		}
 
@@ -795,37 +814,38 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		workers.Logf(m.ragDir, "agent retrieval query=%q results=%d top=%.3f chunkChars=%d", msg.Query, msg.NumResults, msg.TopScore, len(msg.ChunkText))
-		m.addMessage(ChatMessage{
-			Role:    "agentic_step",
-			Content: fmt.Sprintf("[retrieved %d chunks, top=%.3f]", msg.NumResults, msg.TopScore),
-		})
+
+		// Accumulate retrieval results for /sources display on the final answer.
+		m.streamSources = append(m.streamSources, msg.Results...)
+
+		usefulResults := msg.NumResults > 0 && strings.TrimSpace(msg.ChunkText) != ""
+		resultState := "✓"
+		if !usefulResults {
+			resultState = "✗"
+		}
+
 		if m.tuiState.Debug {
 			keyStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 			valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 			dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 			var sb strings.Builder
+			// Consolidated one-line summary + optional stats block.
+			sb.WriteString(keyStyle.Render("  results") + dimStyle.Render(" = ") +
+				valStyle.Render(fmt.Sprintf("%d  top=%.3f  %s", msg.NumResults, msg.TopScore, resultState)) + "\n")
 			if msg.DebugStats != nil {
 				ds := msg.DebugStats
-				sb.WriteString(keyStyle.Render("  query_type") + dimStyle.Render(" = ") + valStyle.Render(ds.QueryType) + "\n")
-				sb.WriteString(keyStyle.Render("  FAISS hits") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.FaissHits)) +
-					"   " + keyStyle.Render("BM25 hits") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.BM25Hits)) + "\n")
-				sb.WriteString(keyStyle.Render("  candidates") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.TotalCandidates)) +
+				sb.WriteString(keyStyle.Render("  FAISS") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.FaissHits)) +
+					"   " + keyStyle.Render("BM25") + dimStyle.Render(" = ") + valStyle.Render(fmt.Sprintf("%d", ds.BM25Hits)) +
 					"   " + keyStyle.Render("reranked") + dimStyle.Render(" → ") + valStyle.Render(fmt.Sprintf("top %d", ds.Reranked)) + "\n")
 			}
-			m.addMessage(ChatMessage{Role: "system", Content: "debug · agent retrieval stats\n" + sb.String(), Prerendered: true})
-		}
-
-		usefulResults := msg.NumResults > 0 && strings.TrimSpace(msg.ChunkText) != ""
-		if m.tuiState.Debug {
-			state := "accepted"
-			if !usefulResults {
-				state = "rejected"
-			}
+			m.addMessage(ChatMessage{Role: "system", Content: "debug · agent retrieval\n" + sb.String(), Prerendered: true})
+		} else {
 			m.addMessage(ChatMessage{
-				Role:    "system",
-				Content: fmt.Sprintf("debug · agent context %s (results=%d top=%.3f)", state, msg.NumResults, msg.TopScore),
+				Role:    "agentic_step",
+				Content: fmt.Sprintf("[retrieved %d chunks, top=%.3f]", msg.NumResults, msg.TopScore),
 			})
 		}
+
 		if !usefulResults {
 			m.agentFailed = append(m.agentFailed, msg.Query)
 			m.agentConsecFail++
@@ -869,11 +889,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addMessage(ChatMessage{Role: "system", Content: sb.String()})
 		}
 
+	// ── Ingest progress ────────────────────────────────────────────────────
+	case IngestProgressMsg:
+		m.ingestProgress = msg.Pct
+		// Re-schedule to read the next progress update from the same channel.
+		return m, tea.Batch(m.spinner.Tick, waitForIngestProgressCmd(msg.ch))
+
 	// ── Pipeline results ───────────────────────────────────────────────────
 	case PipelineResultMsg:
 		m.screen = ScreenChat
 		if msg.Err != nil {
 			m.ingestInProgress = false
+			m.ingestProgress = 0
 			if isBridgePipeError(msg.Err) {
 				// Bridge process died — kill it and restart automatically.
 				if m.bridge != nil {
@@ -888,6 +915,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if msg.Action == "ingest" {
 			m.ingestInProgress = false
+			m.ingestProgress = 0
 			// Refresh chat list and offer to switch to the newly indexed chat.
 			slug := m.ingestNewSlug
 			m.ingestFilename = ""
@@ -2299,7 +2327,11 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.pauseCurrentOp()
 
 	case "/update":
-		m.addMessage(ChatMessage{Role: "system", Content: "checking for update…"})
+		if m.updateAvailable == "" {
+			m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("You're on the latest version (%s).", AppVersion)})
+			return nil
+		}
+		m.addMessage(ChatMessage{Role: "system", Content: fmt.Sprintf("Downloading %s…", m.updateAvailable)})
 		return []tea.Cmd{selfUpdateCmd()}
 
 	case "/pipeline":
@@ -2669,6 +2701,7 @@ func (m *AppModel) resetAgentState() {
 	m.agentMaxSteps = -1
 	m.agentQuestion = ""
 	m.agentConsecFail = 0
+	m.streamSources = nil
 }
 
 // ─── Streaming ────────────────────────────────────────────────────────────────
@@ -3070,6 +3103,26 @@ func (m AppModel) renderStatusBar() string {
 	if chatName == "" {
 		chatName = "none"
 	}
+
+	barBg := ui.ColorDim
+	// barText styles plain key=value items — explicit bg ensures no transparent
+	// gaps after inner ANSI resets from other pill styles.
+	barText := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#c8a8b0")).
+		Background(barBg)
+	// barState styles busy-indicator text (cyan fg, same bg).
+	barState := lipgloss.NewStyle().
+		Foreground(ui.ColorCyan).
+		Background(barBg).
+		Bold(true)
+	// barErr styles error indicators (red fg, same bg).
+	barErr := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f28b82")).
+		Background(barBg).
+		Bold(true)
+	// barSep is the two-space gap between items — must carry the bar bg.
+	barSep := barText.Render("  ")
+
 	activeFlag := lipgloss.NewStyle().
 		Foreground(ui.ColorDim).
 		Background(ui.ColorGreen).
@@ -3080,12 +3133,12 @@ func (m AppModel) renderStatusBar() string {
 		modelShort = modelShort[idx+1:]
 	}
 
-	// Build parts — always-visible items first.
+	// Build parts — always-visible items first (all with explicit bg).
 	parts := []string{
-		"chat=" + chatName,
-		"model=" + modelShort,
-		fmt.Sprintf("window=%d", m.tuiState.Window),
-		fmt.Sprintf("k=%d", m.settings.FinalK),
+		barText.Render("chat=" + chatName),
+		barText.Render("model=" + modelShort),
+		barText.Render(fmt.Sprintf("window=%d", m.tuiState.Window)),
+		barText.Render(fmt.Sprintf("k=%d", m.settings.FinalK)),
 	}
 
 	// Flags shown only when active.
@@ -3108,35 +3161,36 @@ func (m AppModel) renderStatusBar() string {
 		parts = append(parts, activeFlag.Render("mode="+m.tuiState.OutputMode))
 	}
 
-	// Busy state indicator.
+	// Busy state indicator — same bg so no transparent gap.
 	switch m.appState {
 	case StateStarting:
-		parts = append(parts, ui.AgentStepStyle.Render("[starting…]"))
+		parts = append(parts, barState.Render("[starting…]"))
 	case StateRetrieving:
-		parts = append(parts, ui.AgentStepStyle.Render("[retrieving…]"))
+		parts = append(parts, barState.Render("[retrieving…]"))
 	case StateStreaming:
-		parts = append(parts, ui.AgentStepStyle.Render("[streaming…]"))
+		parts = append(parts, barState.Render("[streaming…]"))
 	case StateAgentStep:
-		parts = append(parts, ui.AgentStepStyle.Render(fmt.Sprintf("[agent step %d]", m.agentStep+1)))
+		parts = append(parts, barState.Render(fmt.Sprintf("[agent step %d]", m.agentStep+1)))
 	case StateError:
-		parts = append(parts, ui.ErrorMsgStyle.Render("[error]"))
+		parts = append(parts, barErr.Render("[error]"))
 	}
 	if m.needsAPIKeyWarning() {
-		parts = append(parts, ui.ErrorMsgStyle.Render("[set NIM API key or /rag]"))
+		parts = append(parts, barErr.Render("[set NIM API key or /rag]"))
 	}
 	if m.ingestInProgress {
+		label := m.spinner.View() + " ingesting " + m.ingestFilename
+		if m.ingestProgress > 0 {
+			label = fmt.Sprintf("%s ingesting %s %d%%", m.spinner.View(), m.ingestFilename, m.ingestProgress)
+		}
 		ingestPill := lipgloss.NewStyle().
 			Foreground(ui.ColorDim).
 			Background(ui.ColorCyan).
 			Bold(true).
 			Padding(0, 1).
-			Render(m.spinner.View() + " ingesting " + m.ingestFilename)
+			Render(label)
 		parts = append(parts, ingestPill)
 	}
 
-	// Join with a separator that explicitly carries the bar background colour so
-	// the gap between active-flag pills doesn't fall back to the terminal default.
-	barSep := lipgloss.NewStyle().Background(ui.ColorDim).Render("  ")
 	bar := strings.Join(parts, barSep)
 
 	// Update badge — right-aligned, shown when a newer version is available.
@@ -3705,6 +3759,7 @@ func agentRetrievalCmd(bridge *workers.Bridge, query string, k, window int, debu
 			NumResults: len(results),
 			TopScore:   topScore,
 			ChunkText:  chunkText,
+			Results:    results,
 			DebugStats: stats,
 		}
 	}
@@ -3832,12 +3887,31 @@ func pipelineTestCmd(bridge *workers.Bridge, query string, k, window int) tea.Cm
 }
 
 func pipelineIngestCmd(bridge *workers.Bridge, filePath string) tea.Cmd {
+	progressCh := make(chan workers.IngestProgress, 20)
+	return tea.Batch(
+		// Goroutine: run ingest and stream progress into channel.
+		func() tea.Msg {
+			if bridge == nil {
+				close(progressCh)
+				return PipelineResultMsg{Action: "ingest", Err: fmt.Errorf("bridge not initialised")}
+			}
+			msg, err := bridge.IngestWithProgress(filePath, progressCh)
+			return PipelineResultMsg{Action: "ingest", Message: msg, Err: err}
+		},
+		// Goroutine: relay first progress update; handler re-schedules for next.
+		waitForIngestProgressCmd(progressCh),
+	)
+}
+
+// waitForIngestProgressCmd reads from progressCh and re-schedules itself after
+// each progress update, forming a self-perpetuating command chain.
+func waitForIngestProgressCmd(ch chan workers.IngestProgress) tea.Cmd {
 	return func() tea.Msg {
-		if bridge == nil {
-			return PipelineResultMsg{Action: "ingest", Err: fmt.Errorf("bridge not initialised")}
+		p, ok := <-ch
+		if !ok {
+			return nil // channel closed — ingest done, stop the chain
 		}
-		msg, err := bridge.Ingest(filePath)
-		return PipelineResultMsg{Action: "ingest", Message: msg, Err: err}
+		return IngestProgressMsg{Pct: p.Pct, Message: p.Message, ch: ch}
 	}
 }
 

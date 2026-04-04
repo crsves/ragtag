@@ -158,6 +158,16 @@ func NewBridge(ragDir string) (*Bridge, error) {
 	}
 	cmd.Dir = ragDir
 	cmd.Env = os.Environ()
+	// Pin OMP/BLAS thread counts to 1 to prevent the FAISS + libomp
+	// multi-runtime SIGSEGV on macOS arm64 (several OMP runtimes race during
+	// thread-local initialisation when loaded in the same process).
+	cmd.Env = append(cmd.Env,
+		"OMP_NUM_THREADS=1",
+		"OPENBLAS_NUM_THREADS=1",
+		"MKL_NUM_THREADS=1",
+		"VECLIB_MAXIMUM_THREADS=1",
+		"NUMEXPR_NUM_THREADS=1",
+	)
 	if token := loadHFToken(ragDir); token != "" {
 		cmd.Env = append(cmd.Env,
 			"HF_TOKEN="+token,
@@ -352,6 +362,76 @@ func (b *Bridge) Rebuild() (string, error) {
 	}
 	msg, _ := resp.Extra["message"].(string)
 	return msg, nil
+}
+
+// IngestProgress carries a single progress update emitted by the bridge
+// during a long ingest operation.
+type IngestProgress struct {
+	Pct     int
+	Message string
+}
+
+// IngestWithProgress sends an ingest request to the bridge and streams back
+// progress updates via progressCh until the final result arrives.
+// progressCh is closed when the ingest completes (successfully or not).
+func (b *Bridge) IngestWithProgress(filePath string, progressCh chan<- IngestProgress) (string, error) {
+	b.mu.Lock()
+	defer func() {
+		b.mu.Unlock()
+		close(progressCh)
+	}()
+
+	Logf(b.ragDir, "bridge send cmd=ingest file=%q (with progress)", filePath)
+
+	req := bridgeRequest{Cmd: "ingest", File: filePath}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	if _, err := fmt.Fprintf(b.stdin, "%s\n", data); err != nil {
+		return "", fmt.Errorf("write to bridge: %w", err)
+	}
+
+	// Read lines until we get the final response (not a progress line).
+	for b.stdout.Scan() {
+		line := b.stdout.Text()
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var partial map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &partial); err != nil {
+			continue
+		}
+		// Progress lines carry {"type":"progress",...}
+		if t, _ := partial["type"].(string); t == "progress" {
+			pct := 0
+			if v, ok := partial["pct"].(float64); ok {
+				pct = int(v)
+			}
+			msg, _ := partial["msg"].(string)
+			select {
+			case progressCh <- IngestProgress{Pct: pct, Message: msg}:
+			default: // drop if caller isn't draining fast enough
+			}
+			continue
+		}
+		// Final response.
+		var resp bridgeResponse
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			return "", fmt.Errorf("unmarshal bridge response: %w", err)
+		}
+		if resp.Error != "" {
+			return "", fmt.Errorf("bridge error: %s", resp.Error)
+		}
+		var extra map[string]interface{}
+		_ = json.Unmarshal([]byte(line), &extra)
+		msg, _ := extra["message"].(string)
+		return msg, nil
+	}
+	if err := b.stdout.Err(); err != nil {
+		return "", fmt.Errorf("read bridge response: %w", err)
+	}
+	return "", fmt.Errorf("bridge stdout closed unexpectedly")
 }
 
 // Ingest triggers an incremental ingest from a file path.

@@ -12,6 +12,16 @@ import os
 import traceback
 from pathlib import Path
 
+# Set threading env vars BEFORE any heavy library (FAISS, numpy, torch) is
+# imported.  Multiple OMP runtimes loaded in the same process (e.g. FAISS's
+# libomp + scikit-learn's libomp on macOS arm64) race during thread-local
+# initialisation and can SIGSEGV.  Pinning to 1 thread eliminates the race.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 # On Windows, Python opens stdout/stdin in text mode which translates \n to
 # \r\n on output and strips \r on input.  The Go side reads with bufio.Scanner
 # which strips only \n, leaving a stray \r that breaks JSON parsing.
@@ -186,6 +196,12 @@ def handle(req):
         file_path = req.get("file", "")
         if not file_path:
             return {"error": "file path required"}
+
+        def emit_progress(pct, msg):
+            """Write a progress JSON line directly to stdout (flushed immediately)."""
+            sys.stdout.write(json.dumps({"type": "progress", "pct": pct, "msg": msg}) + "\n")
+            sys.stdout.flush()
+
         cm = get_chat_manager()
         chat = cm.get_active_chat()
         if not chat:
@@ -196,7 +212,10 @@ def handle(req):
                 stem = Path(file_path).stem  # e.g. "slack.json" → "slack"
                 slug = re.sub(r"[^a-z0-9_-]", "-", stem.lower()).strip("-") or "default"
                 store_dir = str(RAG_DIR / "processed" / "chats" / slug)
-                build_rag_system(input_file=file_path, output_dir=store_dir)
+                emit_progress(5, "Normalizing messages…")
+                build_rag_system(input_file=file_path, output_dir=store_dir,
+                                 progress_cb=emit_progress)
+                emit_progress(95, "Registering chat…")
                 cm.register(
                     slug=slug,
                     display_name=stem,
@@ -213,7 +232,9 @@ def handle(req):
         try:
             from update import RAGUpdater
             store_dir = str(chat.get("store_dir", ""))
+            emit_progress(5, "Loading updater…")
             updater = RAGUpdater(store_dir=store_dir)
+            emit_progress(20, "Ingesting new messages…")
             updater.update_from_new_file(file_path)
             _retriever = None
             _retriever_chat = None
