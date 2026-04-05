@@ -32,13 +32,16 @@ class RAGUpdater:
             self.vector_store = None
             self.existing_count = 0
     
-    def update_from_new_file(self, new_file_path: str, messages_per_chunk: int = 1):
+    def update_from_new_file(self, new_file_path: str, messages_per_chunk: int = 1,
+                             limit: int = 0, after_date: str = ""):
         """
         Process new messages from a file and add to index.
         
         Args:
-            new_file_path: Path to new messages JSON file
+            new_file_path: Path to new messages JSON or CSV file
             messages_per_chunk: Chunking strategy (same as original)
+            limit: Max number of messages to index (0 = all, takes most recent)
+            after_date: Only include messages at or after this ISO date (e.g. "2020-01-01")
         """
         print(f"\n{'='*80}")
         print("Processing new messages...")
@@ -47,12 +50,24 @@ class RAGUpdater:
         # Step 1: Normalize new messages
         print("\n[1/4] Normalizing new messages...")
         normalized = self._normalize_new_messages(new_file_path)
-        
+
         if not normalized:
             print("No new messages to process")
             return
-        
-        # Step 2: Chunk new messages
+
+        # Apply date filter
+        if after_date:
+            before = len(normalized)
+            normalized = [m for m in normalized if str(m.get("timestamp", "")) >= after_date]
+            print(f"Date filter (>= {after_date}): {before} → {len(normalized)} messages")
+
+        # Apply count limit (most recent messages)
+        if limit and limit > 0 and len(normalized) > limit:
+            before = len(normalized)
+            normalized = normalized[-limit:]
+            print(f"Limit applied: {before} → {len(normalized)} messages")
+
+
         print(f"\n[2/4] Chunking {len(normalized)} messages...")
         chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)
         

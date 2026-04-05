@@ -1848,8 +1848,8 @@ func (m AppModel) viewPipelineContent() string {
 
 	if m.pipelineIngestConfig {
 		// ── ingest config screen ──────────────────────────────────────
-		filename := filepath.Base(m.pipelineConfigFile)
-		sb.WriteString(accentStyle.Render("◆ Ingest: "+filename) + "\n\n")
+		stem := strings.TrimSuffix(filepath.Base(m.pipelineConfigFile), filepath.Ext(m.pipelineConfigFile))
+		sb.WriteString(accentStyle.Render("◆ Ingest: "+stem) + "\n\n")
 
 		// Show current settings summary
 		limitStr := "all messages"
@@ -1875,10 +1875,15 @@ func (m AppModel) viewPipelineContent() string {
 			sb.WriteString(dimStyle.Render("  How much to index:\n\n"))
 			for i, p := range ingestPresets {
 				isSelected := i == m.pipelineConfigCursor
+				marker := "   "
+				timeHint := ingestTimeHint(p.limit)
 				if isSelected {
-					sb.WriteString(activeStyle.Render("  ▶ " + p.label + "\n"))
+					sb.WriteString(activeStyle.Render(" ▶ ") +
+						activeStyle.Render(fmt.Sprintf("%-16s", p.label)) +
+						dimStyle.Render("  "+timeHint) + "\n")
 				} else {
-					sb.WriteString(dimStyle.Render("    " + p.label + "\n"))
+					sb.WriteString(dimStyle.Render(marker+fmt.Sprintf("%-16s", p.label)) +
+						dimStyle.Render("  "+timeHint) + "\n")
 				}
 			}
 			sb.WriteString("\n")
@@ -1897,11 +1902,12 @@ func (m AppModel) viewPipelineContent() string {
 			for i, f := range m.chatFileList {
 				isSelected := i == m.pipelineFileCursor
 				ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(f), "."))
+				stem := strings.TrimSuffix(f, filepath.Ext(f))
 				extTag := dimStyle.Render("[" + ext + "]")
 				if isSelected {
-					sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") + valStyle.Bold(true).Render(f) + "  " + extTag + "\n")
+					sb.WriteString(ui.ActiveFlagStyle.Render(" ▶ ") + valStyle.Bold(true).Render(stem) + "  " + extTag + "\n")
 				} else {
-					sb.WriteString(dimStyle.Render("  "+f) + "  " + extTag + "\n")
+					sb.WriteString(dimStyle.Render("   "+stem) + "  " + extTag + "\n")
 				}
 			}
 		}
@@ -1942,7 +1948,27 @@ func (m AppModel) viewPipelineContent() string {
 	)
 }
 
-// formatCount formats a number with commas for readability.
+// ingestTimeHint returns a rough time estimate string for a given message limit.
+func ingestTimeHint(limit int) string {
+	switch {
+	case limit == 0:
+		return "time varies"
+	case limit <= 1000:
+		return "~1–2 min"
+	case limit <= 5000:
+		return "~5 min"
+	case limit <= 10000:
+		return "~10 min"
+	case limit <= 50000:
+		return "~45 min"
+	case limit <= 100000:
+		return "~1.5 hrs"
+	default:
+		return "time varies"
+	}
+}
+
+
 func formatCount(n int) string {
 	s := fmt.Sprintf("%d", n)
 	if n < 1000 {
