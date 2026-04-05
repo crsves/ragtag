@@ -1957,17 +1957,25 @@ func (m AppModel) viewPipelineContent() string {
 			}
 		} else {
 			sb.WriteString(dimStyle.Render("  How many messages to index:\n\n"))
+			// Find the longest label for consistent column alignment.
+			maxLabel := 0
+			for _, p := range ingestPresets {
+				if l := len([]rune(p.label)); l > maxLabel {
+					maxLabel = l
+				}
+			}
 			for i, p := range ingestPresets {
 				isSelected := i == m.pipelineConfigCursor
-				marker := "   "
 				timeHint := ingestTimeHint(p.limit)
+				// Pad label to maxLabel runes (unicode-safe).
+				runes := []rune(p.label)
+				pad := strings.Repeat(" ", maxLabel-len(runes))
 				if isSelected {
-					sb.WriteString(activeStyle.Render(" ▶ ") +
-						activeStyle.Render(fmt.Sprintf("%-16s", p.label)) +
-						dimStyle.Render("  "+timeHint) + "\n")
+					sb.WriteString(activeStyle.Render(" ▶  "+p.label+pad) +
+						dimStyle.Render("   "+timeHint) + "\n")
 				} else {
-					sb.WriteString(dimStyle.Render(marker+fmt.Sprintf("%-16s", p.label)) +
-						dimStyle.Render("  "+timeHint) + "\n")
+					sb.WriteString(dimStyle.Render("    "+p.label+pad) +
+						dimStyle.Render("   "+timeHint) + "\n")
 				}
 			}
 			sb.WriteString("\n")
