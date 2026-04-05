@@ -383,6 +383,7 @@ type AppModel struct {
 
 	// Ingest progress
 	ingestInProgress bool
+	ingestCancelled  bool   // set when user cancels; suppresses spurious PipelineResultMsg
 	ingestFilename   string // base filename being ingested (for status bar)
 	ingestProgress   int    // 0-100 percentage, 0 means unknown/indeterminate
 	ingestMessage    string // last progress message from bridge
@@ -943,6 +944,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Pipeline results ───────────────────────────────────────────────────
 	case PipelineResultMsg:
 		m.screen = ScreenChat
+		// If user cancelled the ingest, the goroutine running IngestWithProgress
+		// will eventually deliver a result (error or success) after the bridge
+		// process is killed. Silently discard it.
+		if m.ingestCancelled {
+			m.ingestCancelled = false
+			m.ingestInProgress = false
+			m.viewport.Height = m.viewportHeight()
+			m.ingestLogVP.Height = m.ingestLogVpHeight()
+			return m, nil
+		}
 		if msg.Err != nil {
 			m.ingestInProgress = false
 			m.ingestProgress = 0
@@ -1722,13 +1733,13 @@ var ingestPresets = []struct {
 	limit int // 0 = all
 }{
 	{"All messages", 0},
-	{"Last 100,000", 100000},
-	{"Last 50,000", 50000},
-	{"Last 10,000", 10000},
-	{"Last 5,000", 5000},
-	{"Last 1,000", 1000},
-	{"Custom count…", -1},   // opens text input
-	{"After date…", -2},     // opens date text input
+	{"Last 10,000 msgs", 10000},
+	{"Last 5,000 msgs", 5000},
+	{"Last 1,000 msgs", 1000},
+	{"Last 500 msgs", 500},
+	{"Last 100 msgs", 100},
+	{"Custom count…", -1},  // opens text input
+	{"After date…", -2},    // opens date text input
 }
 
 func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
@@ -1748,15 +1759,16 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
 				m.pipelineInput = ""
 				preset := ingestPresets[m.pipelineConfigCursor]
 				if preset.limit == -1 {
-					// custom count
+					// custom count — parse and immediately start ingest
 					if n, err := fmt.Sscanf(input, "%d", &m.pipelineConfigLimit); n == 0 || err != nil {
 						m.pipelineConfigLimit = 0
 					}
+					m.startIngestFromConfig()
+					return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, m.pipelineConfigFile, m.pipelineConfigLimit, m.pipelineConfigAfter)}
 				} else {
-					// after date
+					// after date — store and return to preset list for confirmation
 					m.pipelineConfigAfter = input
 				}
-				// Re-show config screen for confirmation
 			case tea.KeyBackspace, tea.KeyDelete:
 				if len(m.pipelineInput) > 0 {
 					runes := []rune(m.pipelineInput)
@@ -1928,14 +1940,18 @@ func (m AppModel) viewPipelineContent() string {
 		if m.pipelineConfigCustom {
 			// text input sub-mode
 			preset := ingestPresets[m.pipelineConfigCursor]
-			prompt := "Enter count"
+			prompt := "How many messages (e.g. 300)"
 			if preset.limit == -2 {
 				prompt = "After date (YYYY-MM-DD)"
 			}
 			sb.WriteString(dimStyle.Render("  "+prompt+": ") + activeStyle.Render(m.pipelineInput+"▌") + "\n\n")
-			sb.WriteString(ui.HelpStyle.Render("Enter to confirm · ESC to cancel"))
+			if preset.limit == -1 {
+				sb.WriteString(ui.HelpStyle.Render("Enter to confirm and start · ESC to cancel"))
+			} else {
+				sb.WriteString(ui.HelpStyle.Render("Enter to set date · then G to start · ESC to cancel"))
+			}
 		} else {
-			sb.WriteString(dimStyle.Render("  How much to index:\n\n"))
+			sb.WriteString(dimStyle.Render("  How many messages to index:\n\n"))
 			for i, p := range ingestPresets {
 				isSelected := i == m.pipelineConfigCursor
 				marker := "   "
@@ -2016,16 +2032,18 @@ func ingestTimeHint(limit int) string {
 	switch {
 	case limit == 0:
 		return "time varies"
+	case limit <= 100:
+		return "~15 sec"
+	case limit <= 500:
+		return "~1 min"
 	case limit <= 1000:
-		return "~1–2 min"
+		return "~2 min"
 	case limit <= 5000:
 		return "~5 min"
 	case limit <= 10000:
 		return "~10 min"
 	case limit <= 50000:
 		return "~45 min"
-	case limit <= 100000:
-		return "~1.5 hrs"
 	default:
 		return "time varies"
 	}
@@ -3625,21 +3643,26 @@ func (m *AppModel) handleIngestLogKey(msg tea.KeyMsg) []tea.Cmd {
 		switch string(msg.Runes) {
 		case "c", "C":
 			if m.ingestInProgress {
-				// Kill the bridge process to abort the running ingest.
-				if m.bridge != nil {
-					m.bridge.Kill()
-					m.bridge = nil
-					m.bridgeReady = false
-				}
+				// Mark cancelled first so the orphaned PipelineResultMsg is ignored.
+				m.ingestCancelled = true
 				m.ingestInProgress = false
-				m.ingestProgress = 0
 				m.viewport.Height = m.viewportHeight()
 				m.ingestLogVP.Height = m.ingestLogVpHeight()
 				m.ingestLog = append(m.ingestLog, "[CANCELLED] Ingest stopped by user.")
 				m.refreshIngestLog()
 				m.screen = ScreenChat
 				m.addMessage(ChatMessage{Role: "system", Content: "⚠ Ingest cancelled — restarting bridge…"})
-				return []tea.Cmd{restartBridgeCmd(m.ragDir)}
+				// Kill bridge in a goroutine so it doesn't block the render loop.
+				bridge := m.bridge
+				m.bridge = nil
+				m.bridgeReady = false
+				killCmd := func() tea.Msg {
+					if bridge != nil {
+						bridge.Kill()
+					}
+					return nil
+				}
+				return []tea.Cmd{killCmd, restartBridgeCmd(m.ragDir)}
 			}
 		}
 	}
