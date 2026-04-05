@@ -196,6 +196,8 @@ def handle(req):
         file_path = req.get("file", "")
         if not file_path:
             return {"error": "file path required"}
+        limit = int(req.get("limit", 0) or 0)
+        after_date = str(req.get("after_date", "") or "").strip()
 
         def emit_progress(pct, msg):
             """Write a progress JSON line directly to stdout (flushed immediately)."""
@@ -214,7 +216,8 @@ def handle(req):
                 store_dir = str(RAG_DIR / "processed" / "chats" / slug)
                 emit_progress(5, "Normalizing messages…")
                 build_rag_system(input_file=file_path, output_dir=store_dir,
-                                 progress_cb=emit_progress)
+                                 progress_cb=emit_progress,
+                                 limit=limit, after_date=after_date)
                 emit_progress(95, "Registering chat…")
                 cm.register(
                     slug=slug,
@@ -235,7 +238,7 @@ def handle(req):
             emit_progress(5, "Loading updater…")
             updater = RAGUpdater(store_dir=store_dir)
             emit_progress(20, "Ingesting new messages…")
-            updater.update_from_new_file(file_path)
+            updater.update_from_new_file(file_path, limit=limit, after_date=after_date)
             _retriever = None
             _retriever_chat = None
             return {"ok": True, "message": f"Ingested data from '{file_path}' into '{cm.get_active_slug()}'"}

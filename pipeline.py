@@ -20,16 +20,20 @@ def build_rag_system(
     model_name: str = 'all-MiniLM-L6-v2',
     output_dir: str = 'processed',
     progress_cb=None,
+    limit: int = 0,
+    after_date: str = "",
 ):
     """
-    Build complete RAG system from raw JSON.
+    Build complete RAG system from raw JSON or CSV.
 
     Args:
-        input_file: Path to raw messages JSON
+        input_file: Path to raw messages JSON or CSV
         messages_per_chunk: Chunking strategy (1 = one message per chunk)
         model_name: Embedding model to use
         output_dir: Root directory for all processed output (default: 'processed')
         progress_cb: Optional callable(pct: int, msg: str) for progress reporting
+        limit: Max number of messages to index (0 = all)
+        after_date: Only include messages at or after this date (YYYY-MM-DD, "" = all)
     """
     def _progress(pct, msg):
         if progress_cb:
@@ -48,7 +52,20 @@ def build_rag_system(
     normalized = normalize_messages(input_file, str(out / 'normalized.json'))
     print(f"✓ Normalized {len(normalized)} messages")
 
-    # Step 2: Chunk
+    # Apply date filter
+    if after_date:
+        before_count = len(normalized)
+        normalized = [m for m in normalized if str(m.get("timestamp", "")) >= after_date]
+        print(f"✓ Date filter (>= {after_date}): {before_count} → {len(normalized)} messages")
+        _progress(15, f"Date filter applied: {len(normalized)} messages remain…")
+
+    # Apply count limit (take last N messages — most recent)
+    if limit and limit > 0 and len(normalized) > limit:
+        before_count = len(normalized)
+        normalized = normalized[-limit:]
+        print(f"✓ Limit applied: {before_count} → {len(normalized)} messages")
+        _progress(18, f"Limit applied: indexing {len(normalized)} messages…")
+
     print("\n[STEP 2/5] Chunking messages...")
     _progress(20, "Chunking messages…")
     chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)

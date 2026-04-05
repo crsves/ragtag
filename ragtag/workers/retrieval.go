@@ -111,7 +111,9 @@ type bridgeRequest struct {
 	Slug           string  `json:"slug,omitempty"`
 	MinResults     int     `json:"min_results,omitempty"`
 	ScoreThreshold float64 `json:"score_threshold,omitempty"`
-	File           string  `json:"file,omitempty"` // for ingest
+	File           string  `json:"file,omitempty"`  // for ingest
+	Limit          int     `json:"limit,omitempty"` // max messages to ingest (0=all)
+	AfterDate      string  `json:"after_date,omitempty"` // ISO date filter e.g. "2020-01-01"
 }
 
 // bridgeResponse is the JSON received from the bridge subprocess.
@@ -374,16 +376,17 @@ type IngestProgress struct {
 // IngestWithProgress sends an ingest request to the bridge and streams back
 // progress updates via progressCh until the final result arrives.
 // progressCh is closed when the ingest completes (successfully or not).
-func (b *Bridge) IngestWithProgress(filePath string, progressCh chan<- IngestProgress) (string, error) {
+// limit=0 means no limit; afterDate="" means no date filter.
+func (b *Bridge) IngestWithProgress(filePath string, limit int, afterDate string, progressCh chan<- IngestProgress) (string, error) {
 	b.mu.Lock()
 	defer func() {
 		b.mu.Unlock()
 		close(progressCh)
 	}()
 
-	Logf(b.ragDir, "bridge send cmd=ingest file=%q (with progress)", filePath)
+	Logf(b.ragDir, "bridge send cmd=ingest file=%q limit=%d after=%q (with progress)", filePath, limit, afterDate)
 
-	req := bridgeRequest{Cmd: "ingest", File: filePath}
+	req := bridgeRequest{Cmd: "ingest", File: filePath, Limit: limit, AfterDate: afterDate}
 	data, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)

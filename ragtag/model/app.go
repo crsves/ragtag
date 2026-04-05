@@ -372,6 +372,13 @@ type AppModel struct {
 	pipelinePrompt      string // what we're asking for ("query" or "file")
 	pipelineFilePicking bool   // true = showing raw/ file picker for ingest
 	pipelineFileCursor  int    // cursor within file picker list
+	// Ingest config screen — shown after picking a file, before ingesting.
+	pipelineIngestConfig bool   // true = showing ingest config/limit screen
+	pipelineConfigFile   string // selected file path
+	pipelineConfigCursor int    // cursor in preset list
+	pipelineConfigLimit  int    // 0 = all
+	pipelineConfigAfter  string // ISO date filter, empty = no filter
+	pipelineConfigCustom bool   // true = text input open for custom count or date
 
 	// Ingest progress
 	ingestInProgress bool
@@ -993,7 +1000,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sb.WriteString(dimStyle.Render("  Export after    : ") + valStyle.Render(exportAfter) + "\n\n")
 				sb.WriteString(dimStyle.Render("  DiscordChatExporter flag:\n"))
 				sb.WriteString(valStyle.Render(fmt.Sprintf(`    --after "%s"`, exportAfter)) + "\n\n")
-				sb.WriteString(dimStyle.Render("  Then drop the export JSON into ") + valStyle.Render("raw/") + dimStyle.Render(" and run ") + accentStyle.Render("/ingest"))
+				sb.WriteString(dimStyle.Render("  Then drop your export file into ") + valStyle.Render("raw/") + dimStyle.Render(" and run ") + accentStyle.Render("/ingest"))
 			}
 			m.screen = ScreenChat
 			m.addMessage(ChatMessage{Role: "system", Content: sb.String()})
@@ -1639,8 +1646,100 @@ func (m AppModel) viewInterfaceSettingsContent() string {
 
 // ─── Pipeline screen ──────────────────────────────────────────────────────────
 
+// startIngestFromConfig transitions from config screen to active ingest.
+func (m *AppModel) startIngestFromConfig() {
+	m.pipelineIngestConfig = false
+	m.screen = ScreenChat
+	m.ingestInProgress = true
+}
+
+// ingestPresets defines the quick-pick options shown in the ingest config screen.
+var ingestPresets = []struct {
+	label string
+	limit int // 0 = all
+}{
+	{"All messages", 0},
+	{"Last 100,000", 100000},
+	{"Last 50,000", 50000},
+	{"Last 10,000", 10000},
+	{"Last 5,000", 5000},
+	{"Last 1,000", 1000},
+	{"Custom count…", -1},   // opens text input
+	{"After date…", -2},     // opens date text input
+}
+
 func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
 	m.acConsumedKey = true
+
+	// ── ingest config screen ──────────────────────────────────────────────
+	if m.pipelineIngestConfig {
+		// Sub-mode: text input for custom count or date
+		if m.pipelineConfigCustom {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.pipelineConfigCustom = false
+				m.pipelineInput = ""
+			case tea.KeyEnter:
+				input := strings.TrimSpace(m.pipelineInput)
+				m.pipelineConfigCustom = false
+				m.pipelineInput = ""
+				preset := ingestPresets[m.pipelineConfigCursor]
+				if preset.limit == -1 {
+					// custom count
+					if n, err := fmt.Sscanf(input, "%d", &m.pipelineConfigLimit); n == 0 || err != nil {
+						m.pipelineConfigLimit = 0
+					}
+				} else {
+					// after date
+					m.pipelineConfigAfter = input
+				}
+				// Re-show config screen for confirmation
+			case tea.KeyBackspace, tea.KeyDelete:
+				if len(m.pipelineInput) > 0 {
+					runes := []rune(m.pipelineInput)
+					m.pipelineInput = string(runes[:len(runes)-1])
+				}
+			default:
+				if msg.Type == tea.KeyRunes {
+					m.pipelineInput += msg.String()
+				}
+			}
+			return nil
+		}
+		// Main config navigation
+		switch msg.Type {
+		case tea.KeyEsc:
+			// Back to file picker
+			m.pipelineIngestConfig = false
+			m.pipelineFilePicking = true
+		case tea.KeyUp:
+			if m.pipelineConfigCursor > 0 {
+				m.pipelineConfigCursor--
+			}
+		case tea.KeyDown:
+			if m.pipelineConfigCursor < len(ingestPresets)-1 {
+				m.pipelineConfigCursor++
+			}
+		case tea.KeyEnter:
+			preset := ingestPresets[m.pipelineConfigCursor]
+			if preset.limit == -1 || preset.limit == -2 {
+				// Open text input
+				m.pipelineConfigCustom = true
+				m.pipelineInput = ""
+			} else {
+				// Start ingest with chosen settings
+				m.startIngestFromConfig()
+				return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, m.pipelineConfigFile, m.pipelineConfigLimit, m.pipelineConfigAfter)}
+			}
+		case tea.KeyRunes:
+			// 'g' = go / start ingest with current settings
+			if msg.String() == "g" {
+				m.startIngestFromConfig()
+				return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, m.pipelineConfigFile, m.pipelineConfigLimit, m.pipelineConfigAfter)}
+			}
+		}
+		return nil
+	}
 
 	// ── file picker mode (ingest) ─────────────────────────────────────────
 	if m.pipelineFilePicking {
@@ -1659,12 +1758,16 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
 			if len(m.chatFileList) > 0 {
 				filename := m.chatFileList[m.pipelineFileCursor]
 				path := filepath.Join(m.ragDir, "raw", filename)
+				// Open config screen instead of ingesting immediately.
 				m.pipelineFilePicking = false
-				m.screen = ScreenChat
-				m.ingestInProgress = true
+				m.pipelineIngestConfig = true
+				m.pipelineConfigFile = path
+				m.pipelineConfigCursor = 0
+				m.pipelineConfigLimit = 0
+				m.pipelineConfigAfter = ""
+				m.pipelineConfigCustom = false
 				m.ingestFilename = filename
 				m.ingestNewSlug = deriveSlugFromFilename(filename)
-				return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, path)}
 			}
 		}
 		return nil
@@ -1738,30 +1841,72 @@ func (m AppModel) viewPipelineContent() string {
 	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 	valStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
+	activeStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 
 	var sb strings.Builder
 	sb.WriteString(ui.TitleStyle.Render("Pipeline Management") + "\n\n")
 
-	if m.pipelineFilePicking {
+	if m.pipelineIngestConfig {
+		// ── ingest config screen ──────────────────────────────────────
+		filename := filepath.Base(m.pipelineConfigFile)
+		sb.WriteString(accentStyle.Render("◆ Ingest: "+filename) + "\n\n")
+
+		// Show current settings summary
+		limitStr := "all messages"
+		if m.pipelineConfigLimit > 0 {
+			limitStr = fmt.Sprintf("last %s messages", formatCount(m.pipelineConfigLimit))
+		}
+		afterStr := ""
+		if m.pipelineConfigAfter != "" {
+			afterStr = "  ·  after " + m.pipelineConfigAfter
+		}
+		sb.WriteString(dimStyle.Render("  Current: ") + valStyle.Render(limitStr+afterStr) + "\n\n")
+
+		if m.pipelineConfigCustom {
+			// text input sub-mode
+			preset := ingestPresets[m.pipelineConfigCursor]
+			prompt := "Enter count"
+			if preset.limit == -2 {
+				prompt = "After date (YYYY-MM-DD)"
+			}
+			sb.WriteString(dimStyle.Render("  "+prompt+": ") + activeStyle.Render(m.pipelineInput+"▌") + "\n\n")
+			sb.WriteString(ui.HelpStyle.Render("Enter to confirm · ESC to cancel"))
+		} else {
+			sb.WriteString(dimStyle.Render("  How much to index:\n\n"))
+			for i, p := range ingestPresets {
+				isSelected := i == m.pipelineConfigCursor
+				if isSelected {
+					sb.WriteString(activeStyle.Render("  ▶ " + p.label + "\n"))
+				} else {
+					sb.WriteString(dimStyle.Render("    " + p.label + "\n"))
+				}
+			}
+			sb.WriteString("\n")
+			sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: select · G: start ingest · ESC: back"))
+		}
+
+	} else if m.pipelineFilePicking {
 		// ── file picker ───────────────────────────────────────────────
 		rawPath := filepath.Join(m.ragDir, "raw")
 		sb.WriteString(accentStyle.Render("◆ Ingest — pick a file to add") + "\n")
-		sb.WriteString(dimStyle.Render("  Drop your export JSON into: ") + valStyle.Render(rawPath) + "\n\n")
+		sb.WriteString(dimStyle.Render("  Drop your file into: ") + valStyle.Render(rawPath) + "\n\n")
 		if len(m.chatFileList) == 0 {
-			sb.WriteString(dimStyle.Render("  No JSON files found in raw/") + "\n\n")
-			sb.WriteString(dimStyle.Render("  Export from Slack or Discord, drop the JSON into the folder above, then come back here."))
+			sb.WriteString(dimStyle.Render("  No files found in raw/") + "\n\n")
+			sb.WriteString(dimStyle.Render("  Supports: .json (Slack/Discord exports) and .csv (email datasets)"))
 		} else {
 			for i, f := range m.chatFileList {
 				isSelected := i == m.pipelineFileCursor
+				ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(f), "."))
+				extTag := dimStyle.Render("[" + ext + "]")
 				if isSelected {
-					sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") + valStyle.Bold(true).Render(f) + "\n")
+					sb.WriteString(ui.ActiveFlagStyle.Render("▶ ") + valStyle.Bold(true).Render(f) + "  " + extTag + "\n")
 				} else {
-					sb.WriteString(dimStyle.Render("  "+f) + "\n")
+					sb.WriteString(dimStyle.Render("  "+f) + "  " + extTag + "\n")
 				}
 			}
 		}
 		sb.WriteString("\n")
-		sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: ingest · ESC: back"))
+		sb.WriteString(ui.HelpStyle.Render("↑↓: navigate · Enter: configure & ingest · ESC: back"))
 
 	} else if m.pipelineInputMode {
 		// ── text input ────────────────────────────────────────────────
@@ -1771,9 +1916,9 @@ func (m AppModel) viewPipelineContent() string {
 
 	} else {
 		// ── menu ──────────────────────────────────────────────────────
-		sb.WriteString(dimStyle.Render("  Got new messages? Export from Slack/Discord → drop JSON into raw/ → Ingest.") + "\n\n")
+		sb.WriteString(dimStyle.Render("  Got new data? Drop a JSON or CSV file into raw/ → Ingest.") + "\n\n")
 		descriptions := map[string]string{
-			"ingest":  "add messages from a new export file — fast, no full rebuild needed",
+			"ingest":  "add messages from a new file — choose how much to index",
 			"check":   "show the date range to use when exporting from Slack/Discord",
 			"rebuild": "reprocess all raw data from scratch — use if index is broken or corrupted (slow)",
 			"test":    "run a retrieval query without calling the LLM",
@@ -1795,6 +1940,23 @@ func (m AppModel) viewPipelineContent() string {
 	return lipgloss.NewStyle().Height(m.viewportHeight()).Render(
 		ui.BorderStyle.Width(m.width - 4).Render(sb.String()),
 	)
+}
+
+// formatCount formats a number with commas for readability.
+func formatCount(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 1000 {
+		return s
+	}
+	// Insert commas
+	var result []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, c)
+	}
+	return string(result)
 }
 
 func (m *AppModel) handleSettingsKey(msg tea.KeyMsg) []tea.Cmd {
@@ -4011,7 +4173,7 @@ func pipelineTestCmd(bridge *workers.Bridge, query string, k, window int) tea.Cm
 	}
 }
 
-func pipelineIngestCmd(bridge *workers.Bridge, filePath string) tea.Cmd {
+func pipelineIngestCmd(bridge *workers.Bridge, filePath string, limit int, afterDate string) tea.Cmd {
 	progressCh := make(chan workers.IngestProgress, 20)
 	return tea.Batch(
 		// Goroutine: run ingest and stream progress into channel.
@@ -4020,7 +4182,7 @@ func pipelineIngestCmd(bridge *workers.Bridge, filePath string) tea.Cmd {
 				close(progressCh)
 				return PipelineResultMsg{Action: "ingest", Err: fmt.Errorf("bridge not initialised")}
 			}
-			msg, err := bridge.IngestWithProgress(filePath, progressCh)
+			msg, err := bridge.IngestWithProgress(filePath, limit, afterDate, progressCh)
 			return PipelineResultMsg{Action: "ingest", Message: msg, Err: err}
 		},
 		// Goroutine: relay first progress update; handler re-schedules for next.
@@ -4339,8 +4501,12 @@ func loadChatFileListCmd(ragDir string) tea.Cmd {
 		}
 		var files []string
 		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-				files = append(files, e.Name())
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".csv") {
+				files = append(files, name)
 			}
 		}
 		sort.Strings(files)
