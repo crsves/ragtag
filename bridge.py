@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import os
+import csv
 import traceback
 from pathlib import Path
 
@@ -21,6 +22,10 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+# Raise the CSV field-size limit early so any CSV with large fields (e.g. the
+# Enron email dataset) can be read by any code path in this process.
+csv.field_size_limit(10 * 1024 * 1024)
 
 # On Windows, Python opens stdout/stdin in text mode which translates \n to
 # \r\n on output and strips \r on input.  The Go side reads with bufio.Scanner

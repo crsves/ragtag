@@ -1802,13 +1802,18 @@ func (m *AppModel) handlePipelineKey(msg tea.KeyMsg) []tea.Cmd {
 				m.pipelineConfigCustom = true
 				m.pipelineInput = ""
 			} else {
-				// Start ingest with chosen settings
+				// Apply the selected preset's limit then start ingest.
+				m.pipelineConfigLimit = preset.limit
 				m.startIngestFromConfig()
 				return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, m.pipelineConfigFile, m.pipelineConfigLimit, m.pipelineConfigAfter)}
 			}
 		case tea.KeyRunes:
 			// 'g' = go / start ingest with current settings
 			if msg.String() == "g" {
+				preset := ingestPresets[m.pipelineConfigCursor]
+				if preset.limit >= 0 {
+					m.pipelineConfigLimit = preset.limit
+				}
 				m.startIngestFromConfig()
 				return []tea.Cmd{m.spinner.Tick, pipelineIngestCmd(m.bridge, m.pipelineConfigFile, m.pipelineConfigLimit, m.pipelineConfigAfter)}
 			}
