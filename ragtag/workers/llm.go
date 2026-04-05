@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -101,6 +102,7 @@ func StreamLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatComplet
 }
 
 // CallLLM performs a non-streaming chat completion and returns the full response.
+// It retries up to 2 times on empty-choices responses (transient API errors).
 func CallLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatCompletionMessage) (string, error) {
 	client := newClient(cfg)
 	Logf(cfg.LogDir, "call llm start model=%s messages=%d summary=%s", cfg.Model, len(messages), summarizeMessages(messages))
@@ -114,17 +116,30 @@ func CallLLM(ctx context.Context, cfg LLMConfig, messages []openai.ChatCompletio
 		Stream:      false,
 	}
 
-	resp, err := client.CreateChatCompletion(ctx, req)
-	if err != nil {
-		Logf(cfg.LogDir, "call llm error: %v", err)
-		return "", fmt.Errorf("chat completion: %w", err)
-	}
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := client.CreateChatCompletion(ctx, req)
+		if err != nil {
+			Logf(cfg.LogDir, "call llm error attempt=%d: %v", attempt, err)
+			if attempt == maxAttempts {
+				return "", fmt.Errorf("chat completion: %w", err)
+			}
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			continue
+		}
 
-	if len(resp.Choices) == 0 {
-		Logf(cfg.LogDir, "call llm empty choices id=%s usage=%+v raw=%+v", resp.ID, resp.Usage, resp)
-		return "", fmt.Errorf("no choices in response")
+		if len(resp.Choices) == 0 {
+			Logf(cfg.LogDir, "call llm empty choices attempt=%d id=%s usage=%+v raw=%+v", attempt, resp.ID, resp.Usage, resp)
+			if attempt == maxAttempts {
+				return "", fmt.Errorf("no choices in response")
+			}
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			continue
+		}
+
+		content := strings.TrimSpace(resp.Choices[0].Message.Content)
+		Logf(cfg.LogDir, "call llm success attempt=%d id=%s choices=%d finish=%s content=%q", attempt, resp.ID, len(resp.Choices), resp.Choices[0].FinishReason, clipLog(content, 400))
+		return content, nil
 	}
-	content := strings.TrimSpace(resp.Choices[0].Message.Content)
-	Logf(cfg.LogDir, "call llm success id=%s choices=%d finish=%s content=%q", resp.ID, len(resp.Choices), resp.Choices[0].FinishReason, clipLog(content, 400))
-	return content, nil
+	return "", fmt.Errorf("no choices in response after %d attempts", maxAttempts)
 }

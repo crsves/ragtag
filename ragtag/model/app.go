@@ -2930,6 +2930,7 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 	contextEnabled := m.tuiState.AgentToolContext
 	cfg := m.settings.ToLLMConfig()
 	cfg.LogDir = m.ragDir
+	activeChat := m.activeChat
 
 	return func() (msg tea.Msg) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -2940,7 +2941,7 @@ func (m *AppModel) runAgentStepCmd() tea.Cmd {
 				msg = AgentLLMDoneMsg{Action: "ANSWER", Payload: fmt.Sprintf("[agent panic: %v]", r)}
 			}
 		}()
-		system := buildAgentSystemPrompt(confident, maxSteps, len(searches), contextEnabled)
+		system := buildAgentSystemPrompt(activeChat, confident, maxSteps, len(searches), contextEnabled)
 
 		var remaining string
 		if maxSteps > 0 {
@@ -4528,7 +4529,7 @@ Context chunks:
 %s`, query, retrievedContext, schemaBlock)
 }
 
-func buildAgentSystemPrompt(confident bool, maxSteps, searchesDone int, contextEnabled bool) string {
+func buildAgentSystemPrompt(chatName string, confident bool, maxSteps, searchesDone int, contextEnabled bool) string {
 	var budgetLine string
 	switch {
 	case confident:
@@ -4545,16 +4546,21 @@ func buildAgentSystemPrompt(confident bool, maxSteps, searchesDone int, contextE
 		contextLine = "Surrounding context windows are disabled. You will only receive the matched chunk text."
 	}
 
-	return fmt.Sprintf(`You are querying a semantic search index built from Discord chat logs between two people: 'peepee' (Devin) and 'sania'.
+	dataDesc := "messages"
+	if chatName != "" {
+		dataDesc = fmt.Sprintf("'%s' data", chatName)
+	}
+
+	return fmt.Sprintf(`You are querying a semantic search index built from %s.
 SEARCH queries use semantic similarity — short, natural phrases (3-6 words) work best.
-Each SEARCH returns the most relevant chat message chunks from the logs.
+Each SEARCH returns the most relevant chunks from the indexed data.
 %s
 
 Rules:
-- Output exactly one line starting with SEARCH: <query> to retrieve chunks from the chat log
+- Output exactly one line starting with SEARCH: <query> to retrieve chunks
 - Output exactly one response starting with ANSWER: <response> when you have enough information
 - %s
-- Use short, conversational phrases as queries — NOT boolean expressions or long sentences
+- Use short, natural phrases as queries — NOT boolean expressions or long sentences
 - Each SEARCH must be meaningfully different from previous ones
 - Do NOT repeat the same query twice
 - If a search returns low scores, it means the data doesn't contain that phrasing — pivot completely
@@ -4562,7 +4568,7 @@ Rules:
 - If you've done 3+ searches with no good results, just ANSWER with what you found
 - After 3-4 searches with no useful results, give your best ANSWER based on what was found
 - Do NOT keep searching if you already have enough context to answer
-- Do NOT output JSON, markdown, code fences, bullets, or explanations before SEARCH:/ANSWER:`, contextLine, budgetLine)
+- Do NOT output JSON, markdown, code fences, bullets, or explanations before SEARCH:/ANSWER:`, dataDesc, contextLine, budgetLine)
 }
 
 // parseAgentResponse scans the LLM response for the first SEARCH: or ANSWER:
@@ -5308,21 +5314,45 @@ func (m *AppModel) renderRagBrowserCard(r workers.Result, idx int) string {
 		srcStyle.Render(r.Source) + "  " +
 		dimStyle.Render(browserDisplayTimestamp(r.Chunk.TimestampStart))
 
-	text := sanitizeBrowserChunkText(r.Chunk.Text, r.Chunk.Sender)
-	maxLen := innerWidth * 4
-	if maxLen < 80 {
-		maxLen = 80
-	}
-	if len(text) > maxLen {
-		text = text[:maxLen] + "…"
-	}
-	lines := wrapText(text, innerWidth)
-	if len(lines) == 0 {
-		lines = []string{"(empty chunk)"}
+	// For emails: show subject + snippet; for chat: show plain text snippet.
+	subjectStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	var bodyLines []string
+	if isEmailChunk(r.Chunk.Text) {
+		subject, emailBody := parseEmailChunk(r.Chunk.Text)
+		senderLine := dimStyle.Render("From: ") + srcStyle.Render(r.Chunk.Sender)
+		if subject != "" {
+			bodyLines = append(bodyLines, subjectStyle.Render("✉ "+subject))
+		}
+		bodyLines = append(bodyLines, senderLine)
+		// Brief body preview (first non-empty line).
+		for _, bl := range strings.Split(emailBody, "\n") {
+			if t := strings.TrimSpace(bl); t != "" {
+				preview := t
+				if len([]rune(preview)) > innerWidth {
+					preview = string([]rune(preview)[:innerWidth-1]) + "…"
+				}
+				bodyLines = append(bodyLines, textStyle.Render(preview))
+				break
+			}
+		}
+	} else {
+		text := sanitizeBrowserChunkText(r.Chunk.Text, r.Chunk.Sender)
+		maxLen := innerWidth * 4
+		if maxLen < 80 {
+			maxLen = 80
+		}
+		if len(text) > maxLen {
+			text = text[:maxLen] + "…"
+		}
+		bodyLines = wrapText(text, innerWidth)
+		if len(bodyLines) == 0 {
+			bodyLines = []string{"(empty chunk)"}
+		}
+		bodyLines = []string{textStyle.Render(strings.Join(bodyLines, "\n"))}
 	}
 
 	sep := dimStyle.Render(strings.Repeat("─", innerWidth))
-	body := meta + "\n" + sep + "\n" + textStyle.Render(strings.Join(lines, "\n"))
+	body := meta + "\n" + sep + "\n" + strings.Join(bodyLines, "\n")
 
 	borderColor := ui.ColorDim
 	if idx == m.ragBrowseCursor {
@@ -5408,6 +5438,10 @@ func clampScoreBarFill(score float64, barLen int) int {
 }
 
 func sanitizeBrowserChunkText(text, sender string) string {
+	// For email chunks ([Subject]\nBody), preserve structure instead of collapsing.
+	if isEmailChunk(text) {
+		return strings.TrimSpace(text)
+	}
 	clean := strings.TrimSpace(strings.Join(strings.Fields(text), " "))
 	clean = browserLeadingTimestampRe.ReplaceAllString(clean, "")
 	if sender != "" {
@@ -5417,8 +5451,48 @@ func sanitizeBrowserChunkText(text, sender string) string {
 	return strings.TrimSpace(clean)
 }
 
+// isEmailChunk reports whether chunk text is from an email (starts with [Subject]\n).
+func isEmailChunk(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "[") && strings.Contains(t[:min(len(t), 120)], "]\n")
+}
+
+// parseEmailChunk splits "[Subject]\nBody" into (subject, body).
+func parseEmailChunk(text string) (subject, body string) {
+	t := strings.TrimSpace(text)
+	if !strings.HasPrefix(t, "[") {
+		return "", t
+	}
+	end := strings.Index(t, "]\n")
+	if end < 0 {
+		return "", t
+	}
+	subject = t[1:end]
+	body = strings.TrimSpace(t[end+2:])
+	return subject, body
+}
+
 func browserDisplayTimestamp(ts string) string {
-	ts = strings.TrimSpace(strings.ReplaceAll(ts, "T", " "))
+	ts = strings.TrimSpace(ts)
+	if ts == "" {
+		return ""
+	}
+	// Try RFC 2822 (email) format: "Mon, 14 May 2001 16:39:00 -0700 (PDT)"
+	// or "14 May 2001 16:39:00 -0700"
+	formats := []string{
+		"Mon, 2 Jan 2006 15:04:05 -0700 (MST)",
+		"Mon, 2 Jan 2006 15:04:05 -0700",
+		"2 Jan 2006 15:04:05 -0700 (MST)",
+		"2 Jan 2006 15:04:05 -0700",
+		"Mon, 2 Jan 2006 15:04:05 MST",
+	}
+	for _, fmt2 := range formats {
+		if t, err := time.Parse(fmt2, ts); err == nil {
+			return t.Format("2006-01-02  15:04")
+		}
+	}
+	// Fallback: ISO-style truncation (replaces T separator).
+	ts = strings.ReplaceAll(ts, "T", " ")
 	if len(ts) > 16 {
 		ts = ts[:16]
 	}
@@ -5446,18 +5520,43 @@ func browserTimelineRows(chunks []workers.Chunk, senderWidth, textWidth int, sen
 			sender = "(unknown)"
 		}
 		ts := browserDisplayTimestamp(chunk.TimestampStart)
-		body := sanitizeBrowserChunkText(chunk.Text, chunk.Sender)
-		wrapped := wrapText(body, textWidth)
-		if len(wrapped) == 0 {
-			wrapped = []string{"(empty chunk)"}
-		}
-		prefixPlain := fmt.Sprintf("%-16s  %-*s  ", ts, senderWidth, sender)
-		prefix := tsStyle.Render(fmt.Sprintf("%-16s", ts)) + "  " +
-			senderStyle.Render(fmt.Sprintf("%-*s", senderWidth, sender)) + "  "
-		rows = append(rows, prefix+textStyle.Render(wrapped[0]))
-		indent := strings.Repeat(" ", lipgloss.Width(prefixPlain))
-		for _, line := range wrapped[1:] {
-			rows = append(rows, indent+textStyle.Render(line))
+
+		if isEmailChunk(chunk.Text) {
+			subject, body := parseEmailChunk(chunk.Text)
+			// Email: show date + from + subject on first line, body snippet beneath.
+			dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+			prefix := tsStyle.Render(fmt.Sprintf("%-16s", ts)) + "  " +
+				senderStyle.Render(fmt.Sprintf("%-*s", senderWidth, sender)) + "  "
+			subjectStr := subject
+			if subjectStr == "" {
+				subjectStr = "(no subject)"
+			}
+			rows = append(rows, prefix+dimStyle.Render("✉ ")+textStyle.Render(subjectStr))
+			// Body preview: first non-empty line.
+			indent := strings.Repeat(" ", 16+2+senderWidth+2)
+			for _, bl := range strings.Split(body, "\n") {
+				if t := strings.TrimSpace(bl); t != "" {
+					wrapped := wrapText(t, textWidth)
+					if len(wrapped) > 0 {
+						rows = append(rows, indent+textStyle.Render(wrapped[0]))
+					}
+					break
+				}
+			}
+		} else {
+			body := sanitizeBrowserChunkText(chunk.Text, chunk.Sender)
+			wrapped := wrapText(body, textWidth)
+			if len(wrapped) == 0 {
+				wrapped = []string{"(empty chunk)"}
+			}
+			prefixPlain := fmt.Sprintf("%-16s  %-*s  ", ts, senderWidth, sender)
+			prefix := tsStyle.Render(fmt.Sprintf("%-16s", ts)) + "  " +
+				senderStyle.Render(fmt.Sprintf("%-*s", senderWidth, sender)) + "  "
+			rows = append(rows, prefix+textStyle.Render(wrapped[0]))
+			indent := strings.Repeat(" ", lipgloss.Width(prefixPlain))
+			for _, line := range wrapped[1:] {
+				rows = append(rows, indent+textStyle.Render(line))
+			}
 		}
 	}
 	return rows
@@ -5465,20 +5564,53 @@ func browserTimelineRows(chunks []workers.Chunk, senderWidth, textWidth int, sen
 
 func renderBrowserMainMatchCard(chunk workers.Chunk, width int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorYellow).Bold(true)
+	subjectStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 	userStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
 	textStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite)
 
 	bodyWidth := max(20, width-6)
-	lines := wrapText(sanitizeBrowserChunkText(chunk.Text, chunk.Sender), bodyWidth)
-	if len(lines) == 0 {
-		lines = []string{"(empty chunk)"}
-	}
 
-	content := titleStyle.Render("Main match") + "\n" +
-		dimStyle.Render(browserDisplayTimestamp(chunk.TimestampStart)) + "  " +
-		userStyle.Render(chunk.Sender) + "\n\n" +
-		textStyle.Render(strings.Join(lines, "\n"))
+	var content string
+	if isEmailChunk(chunk.Text) {
+		subject, body := parseEmailChunk(chunk.Text)
+		// Email header block
+		header := ""
+		if subject != "" {
+			header += subjectStyle.Render("✉ "+subject) + "\n"
+		}
+		header += dimStyle.Render("From: ") + userStyle.Render(chunk.Sender)
+		ts := browserDisplayTimestamp(chunk.TimestampStart)
+		if ts != "" {
+			header += "   " + dimStyle.Render("Date: ") + dimStyle.Render(ts)
+		}
+		// Body
+		bodyLines := strings.Split(body, "\n")
+		var wrapped []string
+		for _, bl := range bodyLines {
+			if strings.TrimSpace(bl) == "" {
+				wrapped = append(wrapped, "")
+				continue
+			}
+			wrapped = append(wrapped, wrapText(bl, bodyWidth)...)
+		}
+		if len(wrapped) == 0 {
+			wrapped = []string{"(empty)"}
+		}
+		content = titleStyle.Render("Main match") + "\n" +
+			header + "\n" +
+			dimStyle.Render(strings.Repeat("─", bodyWidth)) + "\n" +
+			textStyle.Render(strings.Join(wrapped, "\n"))
+	} else {
+		lines := wrapText(sanitizeBrowserChunkText(chunk.Text, chunk.Sender), bodyWidth)
+		if len(lines) == 0 {
+			lines = []string{"(empty chunk)"}
+		}
+		content = titleStyle.Render("Main match") + "\n" +
+			dimStyle.Render(browserDisplayTimestamp(chunk.TimestampStart)) + "  " +
+			userStyle.Render(chunk.Sender) + "\n\n" +
+			textStyle.Render(strings.Join(lines, "\n"))
+	}
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
