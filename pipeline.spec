@@ -11,7 +11,12 @@ a = Analysis(
     pathex=[],
     binaries=pil_binaries,
     datas=pil_datas,
-    hiddenimports=pil_hiddenimports + ['tokenizers', 'tokenizers.tokenizers', 'PIL._imaging'],
+    hiddenimports=pil_hiddenimports + [
+        'tokenizers', 'tokenizers.tokenizers', 'PIL._imaging',
+        'torch', 'torch.nn', 'torch.nn.functional',
+        'transformers.integrations.accelerate',
+        'transformers.integrations.peft',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['rthooks/rthook_torch_inspect.py'],

@@ -32,6 +32,7 @@ const (
 	ScreenChatList                          // raw chat file browser
 	ScreenChatViewer                        // paged chat message viewer
 	ScreenRagBrowser                        // interactive RAG-only chunk browser
+	ScreenIngestLog                         // live ingest log viewer
 )
 
 // ChatMessage is one entry in the visible chat log.

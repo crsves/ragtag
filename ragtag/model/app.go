@@ -140,7 +140,7 @@ var allCommands = []cmdSuggestion{
 	{"/help", "open the interactive help browser", 9},
 	{"/stats", "show index statistics", 10},
 	{"/pipeline", "open pipeline management", 10},
-	{"/ingest", "pick a raw/ file and ingest it", 10},
+	{"/ingest", "ingest a file — or view live log if one is running", 10},
 	{"/check", "show what date range to export next", 10},
 	{"/view", "browse raw chat history", 10},
 	{"/confident", "toggle confident mode", 11},
@@ -387,6 +387,8 @@ type AppModel struct {
 	ingestProgress   int    // 0-100 percentage, 0 means unknown/indeterminate
 	ingestMessage    string // last progress message from bridge
 	ingestNewSlug    string // derived slug for the switch-chat prompt
+	ingestLog        []string // accumulated progress messages for log viewer
+	ingestLogVP      viewport.Model // viewport for ScreenIngestLog
 
 	// Chat file viewer
 	chatFileList       []string
@@ -500,6 +502,9 @@ func New() AppModel {
 	// Chat file viewer viewport (sized at first WindowSizeMsg)
 	chatViewVP := viewport.New(80, 20)
 
+	// Ingest log viewport (sized at first WindowSizeMsg)
+	ingestLogVP := viewport.New(80, 20)
+
 	// Spinner
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -518,6 +523,7 @@ func New() AppModel {
 		viewport:       vp,
 		helpVp:         helpVp,
 		chatViewVP:     chatViewVP,
+		ingestLogVP:    ingestLogVP,
 		textarea:       ta,
 		spinner:        sp,
 		appState:       StateStarting,
@@ -589,6 +595,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshHelpContent()
 		m.chatViewVP.Width = m.chatViewVpWidth()
 		m.chatViewVP.Height = m.chatViewVpHeight()
+		m.ingestLogVP.Width = m.helpVpWidth()
+		m.ingestLogVP.Height = m.helpVpHeight()
 		if m.screen == ScreenRagBrowser {
 			m.resizeRagBrowserViewports()
 		}
@@ -916,6 +924,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case IngestProgressMsg:
 		m.ingestProgress = msg.Pct
 		m.ingestMessage = msg.Message
+		if msg.Message != "" {
+			line := fmt.Sprintf("[%3d%%] %s", msg.Pct, msg.Message)
+			m.ingestLog = append(m.ingestLog, line)
+			m.refreshIngestLog()
+		}
 		// Re-schedule to read the next progress update from the same channel.
 		return m, tea.Batch(m.spinner.Tick, waitForIngestProgressCmd(msg.ch))
 
@@ -925,6 +938,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.ingestInProgress = false
 			m.ingestProgress = 0
+			m.ingestLog = append(m.ingestLog, fmt.Sprintf("[ERR] %v", msg.Err))
+			m.refreshIngestLog()
 			if isBridgePipeError(msg.Err) {
 				// Bridge process died — kill it and restart automatically.
 				if m.bridge != nil {
@@ -939,7 +954,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if msg.Action == "ingest" {
 			m.ingestInProgress = false
-			m.ingestProgress = 0
+			m.ingestProgress = 100
+			m.ingestLog = append(m.ingestLog, "[100%] Done.")
+			m.refreshIngestLog()
 			// Refresh chat list and offer to switch to the newly indexed chat.
 			slug := m.ingestNewSlug
 			m.ingestFilename = ""
@@ -1160,6 +1177,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleChatViewerKey(msg)...)
 		case ScreenRagBrowser:
 			cmds = append(cmds, m.handleRagBrowserKey(msg)...)
+		case ScreenIngestLog:
+			cmds = append(cmds, m.handleIngestLogKey(msg)...)
 		}
 		// Silently poll for updates when user enters the settings menu.
 		if m.screen == ScreenSettingsMenu && screenBefore != ScreenSettingsMenu {
@@ -1678,6 +1697,9 @@ func (m *AppModel) startIngestFromConfig() {
 	m.pipelineIngestConfig = false
 	m.screen = ScreenChat
 	m.ingestInProgress = true
+	m.ingestLog = nil // clear log for fresh run
+	m.ingestProgress = 0
+	m.ingestMessage = ""
 }
 
 // ingestPresets defines the quick-pick options shown in the ingest config screen.
@@ -2595,11 +2617,16 @@ func (m *AppModel) handleInlineCmd(raw string) []tea.Cmd {
 		m.pipelineFilePicking = false
 
 	case "/ingest":
-		m.screen = ScreenPipeline
-		m.pipelineCursor = 0
-		m.pipelineFilePicking = true
-		m.pipelineFileCursor = 0
-		return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
+		if m.ingestInProgress {
+			m.refreshIngestLog()
+			m.screen = ScreenIngestLog
+		} else {
+			m.screen = ScreenPipeline
+			m.pipelineCursor = 0
+			m.pipelineFilePicking = true
+			m.pipelineFileCursor = 0
+			return []tea.Cmd{loadChatFileListCmd(m.ragDir)}
+		}
 
 	case "/check":
 		return []tea.Cmd{fetchCheckCmd(m.bridge)}
@@ -3424,6 +3451,8 @@ func (m AppModel) viewMain() string {
 		content = m.viewModelPickerContent()
 	case ScreenNick:
 		content = m.viewNickContent()
+	case ScreenIngestLog:
+		content = m.viewIngestLogContent()
 	default: // ScreenChat
 		if m.appState == StateStarting || len(m.messages) == 0 {
 			content = m.viewSplash()
@@ -3458,7 +3487,7 @@ func (m AppModel) renderIngestBar() string {
 	mauveBg := lipgloss.Color("#4a383f")
 	mauveText := lipgloss.Color("#e0b8c8")
 	greenBg := lipgloss.Color("#2e3e30")
-	greenFill := ui.ColorCyan   // sage green #b8d8ba
+	greenFill := ui.ColorCyan // sage green #b8d8ba
 	greenDim := ui.ColorDim
 
 	stem := strings.TrimSuffix(m.ingestFilename, filepath.Ext(m.ingestFilename))
@@ -3467,30 +3496,81 @@ func (m AppModel) renderIngestBar() string {
 		msg = "preparing…"
 	}
 
-	// Row 1: spinner + label
-	row1Text := fmt.Sprintf("  %s  ingesting %s  —  %s", m.spinner.View(), stem, msg)
-	row1 := lipgloss.NewStyle().
-		Foreground(mauveText).
-		Background(mauveBg).
-		Width(m.width).
-		Render(row1Text)
+	// Row 1: spinner + label — build as plain then pad explicitly so we don't
+	// nest pre-rendered ANSI inside Width(), which causes bg transparency gaps.
+	labelPlain := fmt.Sprintf("  %s  ingesting %s  —  %s", "◌", stem, msg)
+	labelRendered := lipgloss.NewStyle().Foreground(mauveText).Background(mauveBg).
+		Render(fmt.Sprintf("  %s  ingesting %s  —  %s", m.spinner.View(), stem, msg))
+	pad1 := m.width - len([]rune(labelPlain)) // rune count ≈ display width for these chars
+	if pad1 < 0 {
+		pad1 = 0
+	}
+	row1 := labelRendered + lipgloss.NewStyle().Background(mauveBg).Render(strings.Repeat(" ", pad1))
 
-	// Row 2: progress bar
+	// Row 2: progress bar — each segment rendered separately then padded.
 	pct := m.ingestProgress
-	innerW := m.width - 10 // space for " NNN% " suffix
-	if innerW < 4 {
-		innerW = 4
+	barW := m.width - 10 // leave room for "  NNN%  " suffix (8 chars)
+	if barW < 4 {
+		barW = 4
 	}
-	filled := innerW * pct / 100
-	if filled > innerW {
-		filled = innerW
+	filled := barW * pct / 100
+	if filled > barW {
+		filled = barW
 	}
-	bar := lipgloss.NewStyle().Foreground(greenFill).Background(greenBg).Render(strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(greenDim).Background(greenBg).Render(strings.Repeat("░", innerW-filled))
-	pctLabel := lipgloss.NewStyle().Foreground(greenFill).Background(greenBg).Bold(true).Render(fmt.Sprintf("  %3d%%  ", pct))
-	row2 := lipgloss.NewStyle().Background(greenBg).Width(m.width).Render("  " + bar + pctLabel)
+	filledStr := lipgloss.NewStyle().Foreground(greenFill).Background(greenBg).Render(strings.Repeat("█", filled))
+	emptyStr := lipgloss.NewStyle().Foreground(greenDim).Background(greenBg).Render(strings.Repeat("░", barW-filled))
+	pctStr := lipgloss.NewStyle().Foreground(greenFill).Background(greenBg).Bold(true).Render(fmt.Sprintf("  %3d%%  ", pct))
+	// Pad remainder so background fills the full row.
+	usedW := 2 + barW + 8 // "  " + bar + "  NNN%  "
+	padW := m.width - usedW
+	if padW < 0 {
+		padW = 0
+	}
+	prefix2 := lipgloss.NewStyle().Background(greenBg).Render("  ")
+	trail2 := lipgloss.NewStyle().Background(greenBg).Render(strings.Repeat(" ", padW))
+	row2 := prefix2 + filledStr + emptyStr + pctStr + trail2
 
 	return lipgloss.JoinVertical(lipgloss.Left, row1, row2)
+}
+
+// refreshIngestLog rebuilds the ingest log viewport content.
+func (m *AppModel) refreshIngestLog() {
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	var sb strings.Builder
+	sb.WriteString(accentStyle.Render("● Live Ingest Log — " + m.ingestFilename) + "\n\n")
+	for _, line := range m.ingestLog {
+		sb.WriteString(dimStyle.Render(line) + "\n")
+	}
+	if m.ingestInProgress {
+		sb.WriteString("\n" + dimStyle.Render("Still running… ESC to return"))
+	} else {
+		sb.WriteString("\n" + dimStyle.Render("Ingest complete. ESC to return"))
+	}
+	m.ingestLogVP.SetContent(sb.String())
+	m.ingestLogVP.GotoBottom()
+}
+
+func (m AppModel) viewIngestLogContent() string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ui.ColorCyan).
+		Padding(0, 1).
+		Width(m.width - 4).
+		Render(m.ingestLogVP.View())
+}
+
+func (m *AppModel) handleIngestLogKey(msg tea.KeyMsg) []tea.Cmd {
+	m.acConsumedKey = true
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenChat
+	default:
+		var cmd tea.Cmd
+		m.ingestLogVP, cmd = m.ingestLogVP.Update(msg)
+		return []tea.Cmd{cmd}
+	}
+	return nil
 }
 
 func (m AppModel) renderStatusBar() string {
