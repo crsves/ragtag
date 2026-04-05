@@ -922,10 +922,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Ingest progress ────────────────────────────────────────────────────
 	case IngestProgressMsg:
-		m.ingestProgress = msg.Pct
-		m.ingestMessage = msg.Message
+		if msg.Pct >= 0 {
+			m.ingestProgress = msg.Pct
+			m.ingestMessage = msg.Message
+		}
 		if msg.Message != "" {
-			line := fmt.Sprintf("[%3d%%] %s", msg.Pct, msg.Message)
+			var line string
+			if msg.Pct < 0 {
+				// Log-only line from print() capture — indent as detail
+				line = fmt.Sprintf("       ↳ %s", msg.Message)
+			} else {
+				line = fmt.Sprintf("[%3d%%] %s", msg.Pct, msg.Message)
+			}
 			m.ingestLog = append(m.ingestLog, line)
 			m.refreshIngestLog()
 		}
@@ -3485,9 +3493,10 @@ func (m AppModel) viewMain() string {
 // renderIngestBar returns a two-line progress widget shown during ingest.
 // Top row: mauve — spinner + filename + current step message.
 // Bottom row: green — ASCII progress bar + percentage.
-// Returns "" when no ingest is in progress.
+// Returns "" when no ingest is in progress or when the log viewer is open
+// (the log viewer is the authoritative ingest UI on that screen).
 func (m AppModel) renderIngestBar() string {
-	if !m.ingestInProgress {
+	if !m.ingestInProgress || m.screen == ScreenIngestLog {
 		return ""
 	}
 	mauveBg := lipgloss.Color("#4a383f")
@@ -3556,7 +3565,10 @@ func (m *AppModel) refreshIngestLog() {
 }
 
 func (m AppModel) ingestLogVpHeight() int {
-	h := m.helpVpHeight() - 2 // 2 rows: pinned title line + separator
+	// ScreenIngestLog layout (no ingest bar on this screen):
+	//   border(2) + title(1) + sep(1) + viewport(h) + sep(1) + footer(1) + inputBox(3) + statusBar(1) = m.height
+	// So viewport(h) = m.height - 10
+	h := m.height - 10
 	if h < 3 {
 		return 3
 	}
@@ -3566,13 +3578,35 @@ func (m AppModel) ingestLogVpHeight() int {
 func (m AppModel) viewIngestLogContent() string {
 	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
+	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ef959d"))
 	label := m.ingestFilename
 	if label == "" {
-		label = "running"
+		label = "pending"
 	}
-	title := titleStyle.Render("● Live Ingest Log") + "  " + dimStyle.Render(label)
+
+	// Pinned header: spinner (when running) + title + file
+	var titleLine string
+	if m.ingestInProgress {
+		pctStr := accentStyle.Render(fmt.Sprintf("%d%%", m.ingestProgress))
+		titleLine = m.spinner.View() + "  " + titleStyle.Render("Live Ingest Log") +
+			"  " + dimStyle.Render(label) + "  " + pctStr
+	} else {
+		titleLine = accentStyle.Render("✓") + "  " + titleStyle.Render("Ingest Complete") +
+			"  " + dimStyle.Render(label)
+	}
 	sep := dimStyle.Render(strings.Repeat("─", m.width-10))
-	inner := title + "\n" + sep + "\n" + m.ingestLogVP.View()
+
+	// Footer hint
+	var footerLine string
+	if m.ingestInProgress {
+		footerLine = dimStyle.Render("  ↑↓ scroll · ESC back · ") +
+			warnStyle.Render("[C]") + dimStyle.Render(" cancel")
+	} else {
+		footerLine = dimStyle.Render("  ↑↓ scroll · ESC to return")
+	}
+
+	inner := titleLine + "\n" + sep + "\n" + m.ingestLogVP.View() + "\n" + sep + "\n" + footerLine
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.ColorCyan).
@@ -3586,12 +3620,32 @@ func (m *AppModel) handleIngestLogKey(msg tea.KeyMsg) []tea.Cmd {
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.screen = ScreenChat
-	default:
-		var cmd tea.Cmd
-		m.ingestLogVP, cmd = m.ingestLogVP.Update(msg)
-		return []tea.Cmd{cmd}
+		return nil
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "c", "C":
+			if m.ingestInProgress {
+				// Kill the bridge process to abort the running ingest.
+				if m.bridge != nil {
+					m.bridge.Kill()
+					m.bridge = nil
+					m.bridgeReady = false
+				}
+				m.ingestInProgress = false
+				m.ingestProgress = 0
+				m.viewport.Height = m.viewportHeight()
+				m.ingestLogVP.Height = m.ingestLogVpHeight()
+				m.ingestLog = append(m.ingestLog, "[CANCELLED] Ingest stopped by user.")
+				m.refreshIngestLog()
+				m.screen = ScreenChat
+				m.addMessage(ChatMessage{Role: "system", Content: "⚠ Ingest cancelled — restarting bridge…"})
+				return []tea.Cmd{restartBridgeCmd(m.ragDir)}
+			}
+		}
 	}
-	return nil
+	var cmd tea.Cmd
+	m.ingestLogVP, cmd = m.ingestLogVP.Update(msg)
+	return []tea.Cmd{cmd}
 }
 
 func (m AppModel) renderStatusBar() string {

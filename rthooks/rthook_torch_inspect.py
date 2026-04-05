@@ -61,3 +61,39 @@ if hasattr(sys, "_MEIPASS"):
                 sys.modules[_n] = _saved[_n]
             else:
                 sys.modules.pop(_n, None)
+
+# ── 4. torch.nn in transformers/integrations/accelerate.py ──────────────────
+# In PyInstaller frozen bundles, `transformers/integrations/accelerate.py`
+# references `nn` at module-level (line 62+), which was supposed to be bound
+# by an earlier `import torch.nn as nn` in the same file. PyInstaller's frozen
+# import machinery can lose that binding. Fix: pre-import torch and torch.nn
+# and inject them into builtins so any `NameError: name 'nn'` lookup falls back
+# to finding it there.  Also patch the accelerate module's globals directly
+# after it loads via sys.meta_path hook so the name is always available.
+try:
+    import torch as _torch
+    import torch.nn as _torch_nn
+    import builtins as _builtins
+    # Inject into builtins as a last-resort fallback for any unbound `nn` name.
+    if not hasattr(_builtins, 'nn'):
+        _builtins.nn = _torch_nn
+    # Pre-register modules so PyInstaller's FrozenImporter finds them immediately.
+    if 'torch.nn' not in sys.modules:
+        sys.modules['torch.nn'] = _torch_nn
+    # Patch the transformers.integrations.accelerate module's globals if already loaded.
+    _acc = sys.modules.get('transformers.integrations.accelerate')
+    if _acc is not None and not hasattr(_acc, 'nn'):
+        _acc.nn = _torch_nn
+    # Install a post-import hook so the patch is applied even if the module loads later.
+    class _NNPatcher:
+        def find_module(self, name, path=None):
+            return self if name == 'transformers.integrations.accelerate' else None
+        def load_module(self, name):
+            import importlib
+            mod = importlib.import_module(name)
+            if not hasattr(mod, 'nn'):
+                mod.nn = _torch_nn
+            return mod
+    sys.meta_path.insert(0, _NNPatcher())
+except Exception:
+    pass

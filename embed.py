@@ -24,7 +24,7 @@ class EmbeddingGenerator:
         self.model_name = model_name
         print("Model loaded successfully")
     
-    def embed_chunks(self, chunks: List[Dict], batch_size: int = 32,
+    def embed_chunks(self, chunks: List[Dict], batch_size: int = 16,
                      progress_cb=None, pct_start: int = 40, pct_end: int = 90) -> np.ndarray:
         """
         Generate embeddings for all chunks.

@@ -418,6 +418,15 @@ func (b *Bridge) IngestWithProgress(filePath string, limit int, afterDate string
 			}
 			continue
 		}
+		// Log lines carry {"type":"log","msg":"..."} — forwarded print() output.
+		if t, _ := partial["type"].(string); t == "log" {
+			msg, _ := partial["msg"].(string)
+			select {
+			case progressCh <- IngestProgress{Pct: -1, Message: msg}:
+			default:
+			}
+			continue
+		}
 		// Final response.
 		var resp bridgeResponse
 		if err := json.Unmarshal([]byte(line), &resp); err != nil {

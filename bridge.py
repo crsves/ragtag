@@ -49,6 +49,50 @@ _retriever_chat = None
 _chat_manager = None
 
 
+import contextlib
+
+
+class _LogTee:
+    """
+    Replaces sys.stdout during ingest so that print() calls from pipeline/update
+    are forwarded as JSON {"type":"log","msg":"..."} lines to the real pipe,
+    making them visible in the TUI live log viewer.
+    """
+    def __init__(self, emit_log_fn):
+        self._emit = emit_log_fn
+        self._buf = ''
+        self.encoding = 'utf-8'
+        self.errors = 'replace'
+
+    def write(self, s):
+        self._buf += s
+        while '\n' in self._buf:
+            line, self._buf = self._buf.split('\n', 1)
+            line = line.rstrip('\r')
+            if line.strip():
+                self._emit(line)
+        return len(s)
+
+    def flush(self):
+        if self._buf.strip():
+            self._emit(self._buf.strip())
+            self._buf = ''
+
+    def isatty(self):
+        return False
+
+
+@contextlib.contextmanager
+def _capture_print_as_logs(emit_log_fn):
+    """Context manager: redirect print() so each line is forwarded as a log."""
+    old = sys.stdout
+    sys.stdout = _LogTee(emit_log_fn)
+    try:
+        yield
+    finally:
+        sys.stdout = old
+
+
 def ensure_imports():
     global ChatManager, HybridRetriever, _expand_with_window, _build_context
     if ChatManager is None:
@@ -199,10 +243,19 @@ def handle(req):
         limit = int(req.get("limit", 0) or 0)
         after_date = str(req.get("after_date", "") or "").strip()
 
+        # Capture the real stdout BEFORE any wrapper so emit_progress and emit_log
+        # always write directly to the pipe (bypassing our print() capture tee).
+        real_out = sys.stdout
+
         def emit_progress(pct, msg):
-            """Write a progress JSON line directly to stdout (flushed immediately)."""
-            sys.stdout.write(json.dumps({"type": "progress", "pct": pct, "msg": msg}) + "\n")
-            sys.stdout.flush()
+            """Write a progress JSON line to the real pipe (flushed immediately)."""
+            real_out.write(json.dumps({"type": "progress", "pct": pct, "msg": msg}) + "\n")
+            real_out.flush()
+
+        def emit_log(line):
+            """Forward a captured print() line as a JSON log entry."""
+            real_out.write(json.dumps({"type": "log", "msg": line}) + "\n")
+            real_out.flush()
 
         cm = get_chat_manager()
         chat = cm.get_active_chat()
@@ -214,10 +267,11 @@ def handle(req):
                 stem = Path(file_path).stem  # e.g. "slack.json" → "slack"
                 slug = re.sub(r"[^a-z0-9_-]", "-", stem.lower()).strip("-") or "default"
                 store_dir = str(RAG_DIR / "processed" / "chats" / slug)
-                emit_progress(5, "Normalizing messages…")
-                build_rag_system(input_file=file_path, output_dir=store_dir,
-                                 progress_cb=emit_progress,
-                                 limit=limit, after_date=after_date)
+                emit_progress(5, f"Starting full build for '{stem}'…")
+                with _capture_print_as_logs(emit_log):
+                    build_rag_system(input_file=file_path, output_dir=store_dir,
+                                     progress_cb=emit_progress,
+                                     limit=limit, after_date=after_date)
                 emit_progress(95, "Registering chat…")
                 cm.register(
                     slug=slug,
@@ -235,11 +289,13 @@ def handle(req):
         try:
             from update import RAGUpdater
             store_dir = str(chat.get("store_dir", ""))
-            emit_progress(5, "Loading updater…")
-            updater = RAGUpdater(store_dir=store_dir)
-            emit_progress(20, "Ingesting new messages…")
-            updater.update_from_new_file(file_path, limit=limit, after_date=after_date,
-                                         progress_cb=emit_progress)
+            emit_progress(5, "Loading existing index…")
+            with _capture_print_as_logs(emit_log):
+                updater = RAGUpdater(store_dir=store_dir)
+            emit_progress(20, f"Ingesting '{Path(file_path).name}'…")
+            with _capture_print_as_logs(emit_log):
+                updater.update_from_new_file(file_path, limit=limit, after_date=after_date,
+                                             progress_cb=emit_progress)
             _retriever = None
             _retriever_chat = None
             return {"ok": True, "message": f"Ingested data from '{file_path}' into '{cm.get_active_slug()}'"}
