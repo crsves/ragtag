@@ -54,8 +54,8 @@ class RAGUpdater:
         print("Processing new messages...")
         print('='*80)
         
-        _p(25, f"Normalizing {Path(new_file_path).name}…")
-        normalized = self._normalize_new_messages(new_file_path)
+        _p(25, f"Normalizing {Path(new_file_path).name}" + (f" (limit: {limit:,})" if limit else "") + "…")
+        normalized = self._normalize_new_messages(new_file_path, limit=limit)
 
         if not normalized:
             print("No new messages to process")
@@ -63,17 +63,11 @@ class RAGUpdater:
 
         _p(28, f"✓ {len(normalized):,} messages read")
 
-        # Apply date filter
+        # Apply date filter (limit already applied during normalization)
         if after_date:
             before = len(normalized)
             normalized = [m for m in normalized if str(m.get("timestamp", "")) >= after_date]
             _p(30, f"Date filter: {before:,} → {len(normalized):,} messages remain")
-
-        # Apply count limit (most recent messages)
-        if limit and limit > 0 and len(normalized) > limit:
-            before = len(normalized)
-            normalized = normalized[-limit:]
-            _p(32, f"Limit: {before:,} → {len(normalized):,} messages (most recent)")
 
         _p(35, f"Chunking {len(normalized):,} messages…")
         chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)
@@ -106,14 +100,14 @@ class RAGUpdater:
         print(f"Total chunks in store: {self.vector_store.index.ntotal}")
         print('='*80)
     
-    def _normalize_new_messages(self, file_path: str) -> List[Dict]:
-        """Normalize new messages from file."""
+    def _normalize_new_messages(self, file_path: str, limit: int = 0) -> List[Dict]:
+        """Normalize new messages from file, stopping early if limit is set."""
         temp_output = 'processed/temp_normalized.json'
-        normalized = normalize_messages(file_path, temp_output)
-        
+        normalized = normalize_messages(file_path, temp_output, limit=limit)
+
         # Clean up temp file
         Path(temp_output).unlink(missing_ok=True)
-        
+
         return normalized
     
     def update_from_normalized(self, normalized_messages: List[Dict], 

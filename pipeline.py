@@ -46,26 +46,20 @@ def build_rag_system(
     print("BUILDING RAG SYSTEM")
     print("="*80)
 
-    # Step 1: Normalize
+    # Step 1: Normalize — pass limit so CSV readers stop early instead of
+    # reading the entire file and slicing afterwards.
     print("\n[STEP 1/5] Normalizing messages...")
-    _progress(10, f"Normalizing {Path(input_file).name}…")
-    normalized = normalize_messages(input_file, str(out / 'normalized.json'))
+    _progress(10, f"Normalizing {Path(input_file).name}" + (f" (limit: {limit:,})" if limit else "") + "…")
+    normalized = normalize_messages(input_file, str(out / 'normalized.json'), limit=limit)
     print(f"✓ Normalized {len(normalized)} messages")
     _progress(12, f"✓ {len(normalized):,} messages normalized")
 
-    # Apply date filter
+    # Apply date filter (post-normalize, limit already applied above)
     if after_date:
         before_count = len(normalized)
         normalized = [m for m in normalized if str(m.get("timestamp", "")) >= after_date]
         print(f"✓ Date filter (>= {after_date}): {before_count} → {len(normalized)} messages")
-        _progress(15, f"Date filter applied: {len(normalized)} messages remain…")
-
-    # Apply count limit (take last N messages — most recent)
-    if limit and limit > 0 and len(normalized) > limit:
-        before_count = len(normalized)
-        normalized = normalized[-limit:]
-        print(f"✓ Limit applied: {before_count} → {len(normalized)} messages")
-        _progress(18, f"Limit applied: indexing {len(normalized)} messages…")
+        _progress(15, f"Date filter: {len(normalized):,} messages remain")
 
     print("\n[STEP 2/5] Chunking messages...")
     _progress(20, f"Chunking {len(normalized):,} messages…")

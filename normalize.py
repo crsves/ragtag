@@ -68,19 +68,25 @@ def _parse_email_message(raw: str, file_path: str = "") -> Dict:
     }
 
 
-def normalize_email_csv(input_path: str, output_path: str) -> List[Dict]:
+def normalize_email_csv(input_path: str, output_path: str, limit: int = 0) -> List[Dict]:
     """
     Parse a CSV where each row has columns: file, message (raw RFC 2822 email).
     Returns normalized list of messages.
+
+    If limit > 0, stop after collecting that many valid records (reads from the
+    beginning of the file — fast early exit instead of reading all 200k rows).
     """
     # Enron emails can have very large fields; raise the limit well above default 131072.
     csv.field_size_limit(10 * 1024 * 1024)  # 10 MB per field
-    print(f"Reading email CSV: {input_path}...")
+    cap = limit if limit and limit > 0 else None
+    print(f"Reading email CSV: {input_path}" + (f" (limit: {cap})" if cap else "") + "...")
     normalized = []
     idx = 0
     with open(input_path, newline='', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for row in reader:
+            if cap and len(normalized) >= cap:
+                break
             raw = row.get("message", "")
             file_path = row.get("file", "")
             if not raw.strip():
@@ -94,7 +100,7 @@ def normalize_email_csv(input_path: str, output_path: str) -> List[Dict]:
             record["id"] = idx
             normalized.append(record)
             idx += 1
-            if idx % 10000 == 0:
+            if idx % 1000 == 0:
                 print(f"  processed {idx} emails…")
 
     print(f"Normalized {len(normalized)} emails")
@@ -106,7 +112,7 @@ def normalize_email_csv(input_path: str, output_path: str) -> List[Dict]:
     return normalized
 
 
-def normalize_messages(input_path: str, output_path: str) -> List[Dict]:
+def normalize_messages(input_path: str, output_path: str, limit: int = 0) -> List[Dict]:
     """
     Parse input file and extract normalized messages.
     Supports: JSON (chat exports), CSV (email datasets).
@@ -118,7 +124,7 @@ def normalize_messages(input_path: str, output_path: str) -> List[Dict]:
 
     # Route to email CSV parser if file ends in .csv
     if path.suffix.lower() == ".csv":
-        return normalize_email_csv(input_path, output_path)
+        return normalize_email_csv(input_path, output_path, limit=limit)
 
     print(f"Reading {input_path}...")
 
@@ -131,7 +137,6 @@ def normalize_messages(input_path: str, output_path: str) -> List[Dict]:
     # This is a flexible parser that works with common chat export formats
     
     if isinstance(data, dict):
-        # WhatsApp, Telegram, or similar format
         if 'messages' in data:
             messages = data['messages']
         elif 'chats' in data:
@@ -140,13 +145,17 @@ def normalize_messages(input_path: str, output_path: str) -> List[Dict]:
                 if isinstance(chat, dict) and 'messages' in chat:
                     messages.extend(chat['messages'])
         else:
-            # Try to find message-like structures
             messages = [data]
     elif isinstance(data, list):
         messages = data
     else:
         raise ValueError("Unknown JSON structure")
-    
+
+    # For JSON, take the LAST limit entries (most recent) before iterating so
+    # we never process more rows than needed.
+    if limit and limit > 0 and len(messages) > limit:
+        messages = messages[-limit:]
+
     print(f"Processing {len(messages)} messages...")
     
     for idx, msg in enumerate(messages):
