@@ -238,7 +238,8 @@ def handle(req):
             emit_progress(5, "Loading updater…")
             updater = RAGUpdater(store_dir=store_dir)
             emit_progress(20, "Ingesting new messages…")
-            updater.update_from_new_file(file_path, limit=limit, after_date=after_date)
+            updater.update_from_new_file(file_path, limit=limit, after_date=after_date,
+                                         progress_cb=emit_progress)
             _retriever = None
             _retriever_chat = None
             return {"ok": True, "message": f"Ingested data from '{file_path}' into '{cm.get_active_slug()}'"}

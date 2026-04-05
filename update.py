@@ -33,7 +33,8 @@ class RAGUpdater:
             self.existing_count = 0
     
     def update_from_new_file(self, new_file_path: str, messages_per_chunk: int = 1,
-                             limit: int = 0, after_date: str = ""):
+                             limit: int = 0, after_date: str = "",
+                             progress_cb=None):
         """
         Process new messages from a file and add to index.
         
@@ -42,13 +43,19 @@ class RAGUpdater:
             messages_per_chunk: Chunking strategy (same as original)
             limit: Max number of messages to index (0 = all, takes most recent)
             after_date: Only include messages at or after this ISO date (e.g. "2020-01-01")
+            progress_cb: Optional callable(pct: int, msg: str) for progress reporting
         """
+        def _p(pct, msg):
+            print(msg)
+            if progress_cb:
+                progress_cb(pct, msg)
+
         print(f"\n{'='*80}")
         print("Processing new messages...")
         print('='*80)
         
         # Step 1: Normalize new messages
-        print("\n[1/4] Normalizing new messages...")
+        _p(25, "Normalizing new messages…")
         normalized = self._normalize_new_messages(new_file_path)
 
         if not normalized:
@@ -59,16 +66,15 @@ class RAGUpdater:
         if after_date:
             before = len(normalized)
             normalized = [m for m in normalized if str(m.get("timestamp", "")) >= after_date]
-            print(f"Date filter (>= {after_date}): {before} → {len(normalized)} messages")
+            _p(30, f"Date filter applied: {len(normalized)} messages remain…")
 
         # Apply count limit (most recent messages)
         if limit and limit > 0 and len(normalized) > limit:
             before = len(normalized)
             normalized = normalized[-limit:]
-            print(f"Limit applied: {before} → {len(normalized)} messages")
+            _p(32, f"Limit applied: indexing {len(normalized)} messages…")
 
-
-        print(f"\n[2/4] Chunking {len(normalized)} messages...")
+        _p(35, f"Chunking {len(normalized)} messages…")
         chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)
         
         # Update chunk IDs to start after existing chunks
@@ -78,11 +84,11 @@ class RAGUpdater:
         print(f"Created {len(chunks)} new chunks")
         
         # Step 3: Generate embeddings
-        print(f"\n[3/4] Generating embeddings for new chunks...")
+        _p(50, f"Generating embeddings for {len(chunks)} chunks…")
         embeddings = self.embedding_generator.embed_chunks(chunks)
         
         # Step 4: Add to vector store
-        print(f"\n[4/4] Adding to vector store...")
+        _p(90, "Adding to vector store…")
         if self.vector_store is None:
             # Create new store
             self.vector_store = VectorStore(embedding_dim=embeddings.shape[1])

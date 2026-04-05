@@ -385,6 +385,7 @@ type AppModel struct {
 	ingestInProgress bool
 	ingestFilename   string // base filename being ingested (for status bar)
 	ingestProgress   int    // 0-100 percentage, 0 means unknown/indeterminate
+	ingestMessage    string // last progress message from bridge
 	ingestNewSlug    string // derived slug for the switch-chat prompt
 
 	// Chat file viewer
@@ -914,6 +915,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Ingest progress ────────────────────────────────────────────────────
 	case IngestProgressMsg:
 		m.ingestProgress = msg.Pct
+		m.ingestMessage = msg.Message
 		// Re-schedule to read the next progress update from the same channel.
 		return m, tea.Batch(m.spinner.Tick, waitForIngestProgressCmd(msg.ch))
 
@@ -3431,11 +3433,64 @@ func (m AppModel) viewMain() string {
 	}
 	inputRow := m.renderInputRow()
 	statusBar := m.renderStatusBar()
+	ingestBar := m.renderIngestBar()
 	if m.clarify.Active {
 		clarifyPanel := RenderClarify(&m.clarify, m.width)
+		if ingestBar != "" {
+			return lipgloss.JoinVertical(lipgloss.Left, content, clarifyPanel, inputRow, ingestBar, statusBar)
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, content, clarifyPanel, inputRow, statusBar)
 	}
+	if ingestBar != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, content, inputRow, ingestBar, statusBar)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, content, inputRow, statusBar)
+}
+
+// renderIngestBar returns a two-line progress widget shown during ingest.
+// Top row: mauve — spinner + filename + current step message.
+// Bottom row: green — ASCII progress bar + percentage.
+// Returns "" when no ingest is in progress.
+func (m AppModel) renderIngestBar() string {
+	if !m.ingestInProgress {
+		return ""
+	}
+	mauveBg := lipgloss.Color("#4a383f")
+	mauveText := lipgloss.Color("#e0b8c8")
+	greenBg := lipgloss.Color("#2e3e30")
+	greenFill := ui.ColorCyan   // sage green #b8d8ba
+	greenDim := ui.ColorDim
+
+	stem := strings.TrimSuffix(m.ingestFilename, filepath.Ext(m.ingestFilename))
+	msg := m.ingestMessage
+	if msg == "" {
+		msg = "preparing…"
+	}
+
+	// Row 1: spinner + label
+	row1Text := fmt.Sprintf("  %s  ingesting %s  —  %s", m.spinner.View(), stem, msg)
+	row1 := lipgloss.NewStyle().
+		Foreground(mauveText).
+		Background(mauveBg).
+		Width(m.width).
+		Render(row1Text)
+
+	// Row 2: progress bar
+	pct := m.ingestProgress
+	innerW := m.width - 10 // space for " NNN% " suffix
+	if innerW < 4 {
+		innerW = 4
+	}
+	filled := innerW * pct / 100
+	if filled > innerW {
+		filled = innerW
+	}
+	bar := lipgloss.NewStyle().Foreground(greenFill).Background(greenBg).Render(strings.Repeat("█", filled)) +
+		lipgloss.NewStyle().Foreground(greenDim).Background(greenBg).Render(strings.Repeat("░", innerW-filled))
+	pctLabel := lipgloss.NewStyle().Foreground(greenFill).Background(greenBg).Bold(true).Render(fmt.Sprintf("  %3d%%  ", pct))
+	row2 := lipgloss.NewStyle().Background(greenBg).Width(m.width).Render("  " + bar + pctLabel)
+
+	return lipgloss.JoinVertical(lipgloss.Left, row1, row2)
 }
 
 func (m AppModel) renderStatusBar() string {
@@ -3516,19 +3571,6 @@ func (m AppModel) renderStatusBar() string {
 	}
 	if m.needsAPIKeyWarning() {
 		parts = append(parts, barErr.Render("[set NIM API key or /rag]"))
-	}
-	if m.ingestInProgress {
-		label := m.spinner.View() + " ingesting " + m.ingestFilename
-		if m.ingestProgress > 0 {
-			label = fmt.Sprintf("%s ingesting %s %d%%", m.spinner.View(), m.ingestFilename, m.ingestProgress)
-		}
-		ingestPill := lipgloss.NewStyle().
-			Foreground(ui.ColorDim).
-			Background(ui.ColorCyan).
-			Bold(true).
-			Padding(0, 1).
-			Render(label)
-		parts = append(parts, ingestPill)
 	}
 
 	bar := strings.Join(parts, barSep)
@@ -3769,22 +3811,21 @@ func (m AppModel) buildHelpContent() string {
 	sectionStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
 	selectedStyle := lipgloss.NewStyle().Foreground(ui.ColorWhite).Bold(true)
+	cursorStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true).Width(3)
+	plainCursor := lipgloss.NewStyle().Foreground(ui.ColorDim).Width(3)
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("ragtag · Help") + "\n\n")
 	sb.WriteString(dimStyle.Render("Choose a category and press Enter.\n\n"))
 
 	for i, section := range helpSections {
-		marker := "  "
-		title := sectionStyle.Render(section.title)
-		summary := dimStyle.Render(section.summary)
 		if i == m.helpCursor {
-			marker = "▶ "
-			title = selectedStyle.Render(section.title)
-			summary = lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(section.summary)
+			sb.WriteString(cursorStyle.Render("▶") + selectedStyle.Render(section.title) + "\n")
+			sb.WriteString(plainCursor.Render("") + lipgloss.NewStyle().Foreground(ui.ColorWhite).Render(section.summary) + "\n\n")
+		} else {
+			sb.WriteString(plainCursor.Render("") + sectionStyle.Render(section.title) + "\n")
+			sb.WriteString(plainCursor.Render("") + dimStyle.Render(section.summary) + "\n\n")
 		}
-		sb.WriteString(marker + title + "\n")
-		sb.WriteString("   " + summary + "\n\n")
 	}
 	sb.WriteString(dimStyle.Render("Tip: /help opens this menu anytime. /clear wipes the visible chat log only."))
 	return sb.String()
