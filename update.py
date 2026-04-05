@@ -54,41 +54,44 @@ class RAGUpdater:
         print("Processing new messages...")
         print('='*80)
         
-        # Step 1: Normalize new messages
-        _p(25, "Normalizing new messages…")
+        _p(25, f"Normalizing {Path(new_file_path).name}…")
         normalized = self._normalize_new_messages(new_file_path)
 
         if not normalized:
             print("No new messages to process")
             return
 
+        _p(28, f"✓ {len(normalized):,} messages read")
+
         # Apply date filter
         if after_date:
             before = len(normalized)
             normalized = [m for m in normalized if str(m.get("timestamp", "")) >= after_date]
-            _p(30, f"Date filter applied: {len(normalized)} messages remain…")
+            _p(30, f"Date filter: {before:,} → {len(normalized):,} messages remain")
 
         # Apply count limit (most recent messages)
         if limit and limit > 0 and len(normalized) > limit:
             before = len(normalized)
             normalized = normalized[-limit:]
-            _p(32, f"Limit applied: indexing {len(normalized)} messages…")
+            _p(32, f"Limit: {before:,} → {len(normalized):,} messages (most recent)")
 
-        _p(35, f"Chunking {len(normalized)} messages…")
+        _p(35, f"Chunking {len(normalized):,} messages…")
         chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)
-        
+
         # Update chunk IDs to start after existing chunks
         for chunk in chunks:
             chunk['chunk_id'] = self.existing_count + chunk['chunk_id']
-        
+
         print(f"Created {len(chunks)} new chunks")
-        
+        _p(37, f"✓ {len(chunks):,} chunks created")
+
         # Step 3: Generate embeddings
-        _p(50, f"Generating embeddings for {len(chunks)} chunks…")
-        embeddings = self.embedding_generator.embed_chunks(chunks)
-        
+        _p(40, f"Generating embeddings for {len(chunks):,} chunks…")
+        embeddings = self.embedding_generator.embed_chunks(
+            chunks, progress_cb=progress_cb, pct_start=40, pct_end=88)
+
         # Step 4: Add to vector store
-        _p(90, "Adding to vector store…")
+        _p(90, f"Merging {len(chunks):,} new chunks into vector store…")
         if self.vector_store is None:
             # Create new store
             self.vector_store = VectorStore(embedding_dim=embeddings.shape[1])

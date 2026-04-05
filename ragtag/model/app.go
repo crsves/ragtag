@@ -596,7 +596,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chatViewVP.Width = m.chatViewVpWidth()
 		m.chatViewVP.Height = m.chatViewVpHeight()
 		m.ingestLogVP.Width = m.helpVpWidth()
-		m.ingestLogVP.Height = m.helpVpHeight()
+		m.ingestLogVP.Height = m.ingestLogVpHeight()
 		if m.screen == ScreenRagBrowser {
 			m.resizeRagBrowserViewports()
 		}
@@ -940,6 +940,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ingestProgress = 0
 			m.ingestLog = append(m.ingestLog, fmt.Sprintf("[ERR] %v", msg.Err))
 			m.refreshIngestLog()
+			m.viewport.Height = m.viewportHeight() // ingest bar gone, restore height
+			m.ingestLogVP.Height = m.ingestLogVpHeight()
 			if isBridgePipeError(msg.Err) {
 				// Bridge process died — kill it and restart automatically.
 				if m.bridge != nil {
@@ -957,6 +959,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ingestProgress = 100
 			m.ingestLog = append(m.ingestLog, "[100%] Done.")
 			m.refreshIngestLog()
+			m.viewport.Height = m.viewportHeight() // ingest bar gone, restore height
+			m.ingestLogVP.Height = m.ingestLogVpHeight()
 			// Refresh chat list and offer to switch to the newly indexed chat.
 			slug := m.ingestNewSlug
 			m.ingestFilename = ""
@@ -1700,6 +1704,8 @@ func (m *AppModel) startIngestFromConfig() {
 	m.ingestLog = nil // clear log for fresh run
 	m.ingestProgress = 0
 	m.ingestMessage = ""
+	m.viewport.Height = m.viewportHeight()       // shrink viewport to make room for ingest bar
+	m.ingestLogVP.Height = m.ingestLogVpHeight() // also resize log viewer for ingest bar
 }
 
 // ingestPresets defines the quick-pick options shown in the ingest config screen.
@@ -3533,12 +3539,10 @@ func (m AppModel) renderIngestBar() string {
 	return lipgloss.JoinVertical(lipgloss.Left, row1, row2)
 }
 
-// refreshIngestLog rebuilds the ingest log viewport content.
+// refreshIngestLog rebuilds the ingest log viewport content (log lines only; title is pinned outside).
 func (m *AppModel) refreshIngestLog() {
 	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
-	accentStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
 	var sb strings.Builder
-	sb.WriteString(accentStyle.Render("● Live Ingest Log — " + m.ingestFilename) + "\n\n")
 	for _, line := range m.ingestLog {
 		sb.WriteString(dimStyle.Render(line) + "\n")
 	}
@@ -3551,13 +3555,30 @@ func (m *AppModel) refreshIngestLog() {
 	m.ingestLogVP.GotoBottom()
 }
 
+func (m AppModel) ingestLogVpHeight() int {
+	h := m.helpVpHeight() - 2 // 2 rows: pinned title line + separator
+	if h < 3 {
+		return 3
+	}
+	return h
+}
+
 func (m AppModel) viewIngestLogContent() string {
+	titleStyle := lipgloss.NewStyle().Foreground(ui.ColorCyan).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(ui.ColorDim)
+	label := m.ingestFilename
+	if label == "" {
+		label = "running"
+	}
+	title := titleStyle.Render("● Live Ingest Log") + "  " + dimStyle.Render(label)
+	sep := dimStyle.Render(strings.Repeat("─", m.width-10))
+	inner := title + "\n" + sep + "\n" + m.ingestLogVP.View()
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.ColorCyan).
 		Padding(0, 1).
 		Width(m.width - 4).
-		Render(m.ingestLogVP.View())
+		Render(inner)
 }
 
 func (m *AppModel) handleIngestLogKey(msg tea.KeyMsg) []tea.Cmd {
@@ -4522,11 +4543,19 @@ func (m AppModel) viewportHeight() int {
 	if m.clarify.Active {
 		clarifyHeight = m.clarify.PanelHeight()
 	}
-	h := m.height - 4 - acHeight - clarifyHeight
+	h := m.height - 4 - acHeight - clarifyHeight - m.ingestBarRows()
 	if h < 5 {
 		return 5
 	}
 	return h
+}
+
+// ingestBarRows returns the number of rows occupied by the ingest progress bar.
+func (m AppModel) ingestBarRows() int {
+	if m.ingestInProgress {
+		return 2
+	}
+	return 0
 }
 
 // helpVpHeight returns the inner height of the help pager viewport.
@@ -4534,8 +4563,7 @@ func (m AppModel) viewportHeight() int {
 // consumes 2 (top + bottom), and we also account for the 1-line hint above
 // the input box when the help screen is active.
 func (m AppModel) helpVpHeight() int {
-	// When the help screen is shown, renderInputRow appends one extra hint line.
-	h := m.height - 4 - 1 - 2 // total - inputRow(3+statusBar(1)) - hintLine(1) - border(2)
+	h := m.height - 4 - 1 - 2 - m.ingestBarRows() // total - inputRow(4) - border(2) - ingestBar
 	if h < 3 {
 		return 3
 	}

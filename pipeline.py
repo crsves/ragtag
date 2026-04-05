@@ -48,9 +48,10 @@ def build_rag_system(
 
     # Step 1: Normalize
     print("\n[STEP 1/5] Normalizing messages...")
-    _progress(10, "Normalizing messages…")
+    _progress(10, f"Normalizing {Path(input_file).name}…")
     normalized = normalize_messages(input_file, str(out / 'normalized.json'))
     print(f"✓ Normalized {len(normalized)} messages")
+    _progress(12, f"✓ {len(normalized):,} messages normalized")
 
     # Apply date filter
     if after_date:
@@ -67,16 +68,18 @@ def build_rag_system(
         _progress(18, f"Limit applied: indexing {len(normalized)} messages…")
 
     print("\n[STEP 2/5] Chunking messages...")
-    _progress(20, "Chunking messages…")
+    _progress(20, f"Chunking {len(normalized):,} messages…")
     chunks = chunk_messages(normalized, messages_per_chunk=messages_per_chunk)
     save_chunks(chunks, str(out / 'chunks.json'))
     print(f"✓ Created {len(chunks)} chunks")
+    _progress(22, f"✓ {len(chunks):,} chunks created")
 
     # Step 3: Generate embeddings
     print("\n[STEP 3/5] Generating embeddings...")
-    _progress(35, f"Generating embeddings for {len(chunks)} chunks…")
+    _progress(35, f"Loading embedding model ({model_name})…")
     generator = EmbeddingGenerator(model_name)
-    embeddings = generator.embed_chunks(chunks)
+    _progress(38, f"Generating embeddings for {len(chunks)} chunks…")
+    embeddings = generator.embed_chunks(chunks, progress_cb=progress_cb, pct_start=38, pct_end=85)
     save_embeddings(embeddings, chunks, str(out / 'embeddings'))
     print(f"✓ Generated embeddings with shape {embeddings.shape}")
 
