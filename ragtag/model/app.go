@@ -3323,28 +3323,26 @@ func (m AppModel) renderStatusBar() string {
 	// Update badge — right-aligned, shown when a newer version is available.
 	if m.updateAvailable != "" {
 		badge := lipgloss.NewStyle().
-			Foreground(ui.ColorYellow).Bold(true).
+			Foreground(ui.ColorYellow).Bold(true).Background(barBg).
 			Render(fmt.Sprintf("↑ %s available · /update", m.updateAvailable))
-		// Pad bar to fill width, then append badge on the right.
 		barPlain := lipgloss.NewStyle().Width(m.width).Render(bar)
 		barWidth := lipgloss.Width(barPlain)
 		badgeWidth := lipgloss.Width(badge)
 		if barWidth+badgeWidth+2 <= m.width {
-			// Fit on same line
-			bar = bar + strings.Repeat(" ", m.width-barWidth-badgeWidth) + badge
+			bar = bar + barText.Render(strings.Repeat(" ", m.width-barWidth-badgeWidth)) + badge
 		} else {
-			bar = bar + "  " + badge
+			bar = bar + barSep + badge
 		}
 	}
 
 	// Version badge — far right of status bar, debug mode on main chat screen only.
 	if m.tuiState.Debug && m.screen == ScreenChat {
-		verBadge := lipgloss.NewStyle().Foreground(ui.ColorDim).Faint(true).Render(AppVersion)
+		verBadge := lipgloss.NewStyle().Foreground(ui.ColorDim).Faint(true).Background(barBg).Render(AppVersion)
 		barNaturalWidth := lipgloss.Width(bar)
 		verW := lipgloss.Width(verBadge)
 		padding := m.width - barNaturalWidth - verW - 2 // -2 for status bar padding
 		if padding > 0 {
-			bar = bar + strings.Repeat(" ", padding) + verBadge
+			bar = bar + barText.Render(strings.Repeat(" ", padding)) + verBadge
 		}
 	}
 
