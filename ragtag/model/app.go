@@ -284,8 +284,9 @@ type AppModel struct {
 	height   int
 
 	// State
-	appState AppState
-	screen   Screen
+	appState   AppState
+	screen     Screen
+	prevScreen Screen // tracks last screen for transition detection
 
 	// Data
 	messages []ChatMessage
@@ -1045,6 +1046,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	// ── Silent settings-menu version poll result ────────────────────────────
+	case SilentVersionPollMsg:
+		if msg.Latest != "" && !m.clarify.Active {
+			m.updateAvailable = msg.Latest
+			question := fmt.Sprintf("ragtag %s is available — update now?", msg.Latest)
+			m.clarify = ClarifyState{
+				Active:   true,
+				Kind:     ClarifyKindUpdate,
+				Question: question,
+				Options: []ClarifyOption{
+					{ID: "yes", Label: "Update now"},
+					{ID: "no", Label: "Later"},
+				},
+				Cursor:           0,
+				SuggestedDefault: "yes",
+			}
+		}
+
 	// ── Version check ──────────────────────────────────────────────────────
 	case VersionCheckMsg:
 		if msg.Err == nil && isNewerVersion(AppVersion, msg.Latest) {
@@ -1109,6 +1128,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		screenBefore := m.screen
 		switch m.screen {
 		case ScreenChat:
 			cmds = append(cmds, m.handleChatKey(msg)...)
@@ -1139,6 +1159,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ScreenRagBrowser:
 			cmds = append(cmds, m.handleRagBrowserKey(msg)...)
 		}
+		// Silently poll for updates when user enters the settings menu.
+		if m.screen == ScreenSettingsMenu && screenBefore != ScreenSettingsMenu {
+			cmds = append(cmds, silentVersionPollCmd())
+		}
+		m.prevScreen = screenBefore
 	}
 
 	// Forward events to textarea only on the main chat screen.

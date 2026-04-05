@@ -73,6 +73,8 @@ def normalize_email_csv(input_path: str, output_path: str) -> List[Dict]:
     Parse a CSV where each row has columns: file, message (raw RFC 2822 email).
     Returns normalized list of messages.
     """
+    # Enron emails can have very large fields; raise the limit well above default 131072.
+    csv.field_size_limit(10 * 1024 * 1024)  # 10 MB per field
     print(f"Reading email CSV: {input_path}...")
     normalized = []
     idx = 0

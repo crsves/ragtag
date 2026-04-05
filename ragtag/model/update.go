@@ -107,6 +107,41 @@ type FreshUpdateCheckMsg struct {
 	Err    error
 }
 
+// SilentVersionPollMsg is the result of a background version poll (e.g. on
+// settings menu entry). Latest is non-empty only when a newer version exists;
+// errors are silently swallowed.
+type SilentVersionPollMsg struct {
+	Latest string // empty = already on latest or check failed
+}
+
+// silentVersionPollCmd checks the version server in the background. If a newer
+// version is found it returns SilentVersionPollMsg{Latest: v}; otherwise it
+// returns SilentVersionPollMsg{} and the caller ignores it.
+func silentVersionPollCmd() tea.Cmd {
+	return func() tea.Msg {
+		client := &http.Client{Timeout: 6 * time.Second}
+		resp, err := client.Get(versionCheckURL)
+		if err != nil {
+			return SilentVersionPollMsg{}
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return SilentVersionPollMsg{}
+		}
+		var payload struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return SilentVersionPollMsg{}
+		}
+		if !isNewerVersion(AppVersion, payload.Version) {
+			return SilentVersionPollMsg{}
+		}
+		return SilentVersionPollMsg{Latest: payload.Version}
+	}
+}
+
 // checkVersionThenUpdateCmd does a fresh version check when the user explicitly
 // runs /update. If a newer version is found it proceeds to download it directly;
 // if already on the latest it returns FreshUpdateCheckMsg with empty Latest.
